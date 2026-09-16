@@ -47,6 +47,7 @@ jobs:
           context: .
           push: true
           provenance: false
+          outputs: type=image,oci-mediatypes=false
           cache-from: type=gha
           cache-to: type=gha,mode=max
           tags: ghcr.io/${{ env.REPO }}/vantage6-vfl:${{ env.BRANCH_TAG }}
@@ -58,6 +59,7 @@ jobs:
           context: .
           push: true
           provenance: false
+          outputs: type=image,oci-mediatypes=false
           cache-from: type=gha
           cache-to: type=gha,mode=max
           tags: |
