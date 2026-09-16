@@ -1,0 +1,63 @@
+name: Build Algorithm Image
+
+on:
+  push:
+    branches: ['**']
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract branch name
+        id: extract_branch
+        shell: bash
+        run: echo "branch=${GITHUB_REF#refs/heads/}" >> "$GITHUB_OUTPUT"
+
+      - name: Sanitize branch tag
+        run: |
+          BRANCH_RAW="${{ steps.extract_branch.outputs.branch }}"
+          echo "BRANCH_TAG=${BRANCH_RAW//\//-}" >> "$GITHUB_ENV"
+
+      - name: Downcase repo name
+        run: echo "REPO=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push (branch)
+        uses: docker/build-push-action@v5
+        if: steps.extract_branch.outputs.branch != 'main'
+        with:
+          context: .
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: ghcr.io/${{ env.REPO }}/vantage6-vfl:${{ env.BRANCH_TAG }}
+
+      - name: Build and push (main)
+        uses: docker/build-push-action@v5
+        if: steps.extract_branch.outputs.branch == 'main'
+        with:
+          context: .
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ghcr.io/${{ env.REPO }}/vantage6-vfl:${{ env.BRANCH_TAG }}
+            ghcr.io/${{ env.REPO }}/vantage6-vfl:latest
