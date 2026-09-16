@@ -50,6 +50,10 @@ def central(client: AlgorithmClient, client_org_ids: list, agg_org_ids: list):
     info(f"Central: PSI complete - {intersection_size}/{total_entities} entities matched")
 
     return {
+        "summary": [
+            {"metric": "intersection_size", "value": intersection_size},
+            {"metric": "total_entities", "value": total_entities},
+        ],
         "intersection_size": intersection_size,
         "total_entities": total_entities,
         "slots": slots,
