@@ -41,44 +41,38 @@ def central(client: AlgorithmClient, client_org_ids: list, agg_org_ids: list, de
         res = client.wait_for_results(task_id=task_id)
         results[org_id] = res[0] if res else None
 
-    # The aggregators never learn the answer - the MPC circuit sends each of
-    # them only their own share of the output (sint.reveal_to_clients), and
-    # each client independently reconstructs the plaintext locally from the
-    # 3 shares it receives. So the final answer is read from the clients,
-    # not the aggregators - and since every client reconstructs it
-    # independently, we can cross-check that they all agree as extra
-    # evidence of correctness (Rep3's guarantee assumes at most 1 of the 3
-    # computing parties is dishonest).
+    # The aggregators never learn the answer - the MPC circuit obliviously
+    # sorts all parties' (hashed) identifier values, finds 3-way matches,
+    # and sends each aggregator only its own share of each client's
+    # per-entry match flags (sint.reveal_to_clients). Each client
+    # reconstructs its own match flags locally from the 3 shares it
+    # receives and derives its own intersection_size - real entity values
+    # are never revealed to any computing party, and no fixed/known entity
+    # universe is assumed (matching values can be arbitrary identifiers).
+    # Since all 3 clients independently compute the size of the same
+    # underlying set, we cross-check that they agree as extra evidence of
+    # correctness (Rep3's guarantee assumes at most 1 of the 3 computing
+    # parties is dishonest).
     intersection_size = None
-    total_entities = None
-    slots = None
     client_answers = {}
     for org_id in client_org_ids:
         r = results.get(org_id)
         if r and r.get("status") == "complete":
-            client_answers[org_id] = (r.get("intersection_size"), r.get("total_entities"))
+            client_answers[org_id] = r.get("intersection_size")
             if intersection_size is None:
                 intersection_size = r.get("intersection_size")
-                total_entities = r.get("total_entities")
-                slots = r.get("slots")
 
     clients_agree = len(set(client_answers.values())) <= 1 if client_answers else None
 
-    info(
-        f"Central: PSI complete - {intersection_size}/{total_entities} entities matched "
-        f"(clients_agree={clients_agree})"
-    )
+    info(f"Central: PSI complete - intersection_size={intersection_size} (clients_agree={clients_agree})")
 
     output = {
         "summary": [
             {"metric": "intersection_size", "value": intersection_size},
-            {"metric": "total_entities", "value": total_entities},
             {"metric": "clients_agree", "value": clients_agree},
         ],
         "intersection_size": intersection_size,
-        "total_entities": total_entities,
         "clients_agree": clients_agree,
-        "slots": slots,
     }
 
     if debug:
