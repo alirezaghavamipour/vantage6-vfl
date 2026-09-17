@@ -4,11 +4,16 @@ from vantage6.algorithm.tools.util import info
 
 
 @algorithm_client
-def central(client: AlgorithmClient, client_org_ids: list, agg_org_ids: list):
+def central(client: AlgorithmClient, client_org_ids: list, agg_org_ids: list, debug: bool = False):
     """
     Orchestrate a full Rep3 PSI run in one submission: dispatch
     psi_client_share to each feature/label party and psi_party_run to
     each computing party, then collect and summarize the result.
+
+    By default only the merged final answer is returned - not each
+    party's individual raw result - to avoid unnecessarily exposing
+    e.g. each client's own local dataset size. Set debug=True to also
+    include the full per-party results, for auditing one specific run.
     """
     info(f"Central: starting PSI run - clients={client_org_ids}, aggregators={agg_org_ids}")
 
@@ -64,7 +69,7 @@ def central(client: AlgorithmClient, client_org_ids: list, agg_org_ids: list):
         f"(clients_agree={clients_agree})"
     )
 
-    return {
+    output = {
         "summary": [
             {"metric": "intersection_size", "value": intersection_size},
             {"metric": "total_entities", "value": total_entities},
@@ -74,6 +79,10 @@ def central(client: AlgorithmClient, client_org_ids: list, agg_org_ids: list):
         "total_entities": total_entities,
         "clients_agree": clients_agree,
         "slots": slots,
-        "client_results": {org_id: results.get(org_id) for org_id in client_org_ids},
-        "aggregator_results": {org_id: results.get(org_id) for org_id in agg_org_ids},
     }
+
+    if debug:
+        output["client_results"] = {org_id: results.get(org_id) for org_id in client_org_ids}
+        output["aggregator_results"] = {org_id: results.get(org_id) for org_id in agg_org_ids}
+
+    return output
