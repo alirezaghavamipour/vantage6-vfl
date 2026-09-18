@@ -3,24 +3,60 @@ from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.util import info
 
 
+SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
+
+
 @algorithm_client
-def central(client: AlgorithmClient, client_org_ids: list, agg_org_ids: list, debug: bool = False):
+def central(
+    client: AlgorithmClient,
+    client_org_ids: list,
+    agg_org_ids: list,
+    matching_method: str = "exact",
+    fuzzy_threshold: int = 2,
+    debug: bool = False,
+):
     """
     Orchestrate a full Rep3 PSI run in one submission: dispatch
     psi_client_share to each feature/label party and psi_party_run to
     each computing party, then collect and summarize the result.
+
+    matching_method: "exact" (hash-based exact match on the full name -
+    fast, but a single typo or nickname produces no match at all) or
+    "fuzzy" (nickname-canonicalized + bounded edit-distance matching,
+    tolerant of typos and common nicknames - far more MPC work, measured
+    at ~14 minutes at this deployment's scale vs seconds for exact).
+
+    fuzzy_threshold: only used when matching_method="fuzzy". Max number
+    of character edits (insert/delete/substitute) allowed for a name to
+    still count as a match - 1, 2, or 3. This is a precision/recall
+    tradeoff, not a bug to be tuned away: a higher threshold catches more
+    real typos but also risks merging two different people who happen to
+    have similar names (e.g. "Martin"/"Martinez" are 2 edits apart).
+    Lower threshold = fewer such false positives, but may miss some
+    genuine typos (e.g. a single transposed pair of letters is 2 edits
+    under standard edit distance, not 1). Default 2. The threshold shapes
+    the MPC circuit itself, so only pre-compiled values are accepted.
 
     By default only the merged final answer is returned - not each
     party's individual raw result - to avoid unnecessarily exposing
     e.g. each client's own local dataset size. Set debug=True to also
     include the full per-party results, for auditing one specific run.
     """
-    info(f"Central: starting PSI run - clients={client_org_ids}, aggregators={agg_org_ids}")
+    if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
+        raise ValueError(
+            f"fuzzy_threshold={fuzzy_threshold} is not supported "
+            f"(choose one of {SUPPORTED_FUZZY_THRESHOLDS})"
+        )
+
+    info(f"Central: starting PSI run (method={matching_method}, fuzzy_threshold={fuzzy_threshold}) "
+         f"- clients={client_org_ids}, aggregators={agg_org_ids}")
+
+    kwargs = {"matching_method": matching_method, "fuzzy_threshold": fuzzy_threshold}
 
     tasks = {}
     for org_id in client_org_ids:
         t = client.task.create(
-            input_={"method": "psi_client_share", "kwargs": {}},
+            input_={"method": "psi_client_share", "kwargs": kwargs},
             organizations=[org_id],
             name=f"psi-client-{org_id}",
         )
@@ -28,7 +64,7 @@ def central(client: AlgorithmClient, client_org_ids: list, agg_org_ids: list, de
 
     for org_id in agg_org_ids:
         t = client.task.create(
-            input_={"method": "psi_party_run", "kwargs": {}},
+            input_={"method": "psi_party_run", "kwargs": kwargs},
             organizations=[org_id],
             name=f"psi-agg-{org_id}",
         )
@@ -68,9 +104,13 @@ def central(client: AlgorithmClient, client_org_ids: list, agg_org_ids: list, de
 
     output = {
         "summary": [
+            {"metric": "matching_method", "value": matching_method},
+            {"metric": "fuzzy_threshold", "value": fuzzy_threshold if matching_method == "fuzzy" else None},
             {"metric": "intersection_size", "value": intersection_size},
             {"metric": "clients_agree", "value": clients_agree},
         ],
+        "matching_method": matching_method,
+        "fuzzy_threshold": fuzzy_threshold if matching_method == "fuzzy" else None,
         "intersection_size": intersection_size,
         "clients_agree": clients_agree,
     }
