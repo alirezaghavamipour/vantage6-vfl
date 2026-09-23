@@ -14,3 +14,5 @@ from .train_splitvflc import train_client_run_splitvflc, train_party_run_splitvf
 from .central_train_splitvflc import central_train_splitvflc
 from .train_splitvfl_vanilla import vanilla_train_splitvfl_bottom_run, vanilla_train_splitvfl_top_run
 from .central_train_splitvfl_vanilla import central_train_splitvfl_vanilla
+from .train_splitvfl import train_client_run_splitvfl, train_party_run_splitvfl
+from .central_train_splitvfl import central_train_splitvfl
