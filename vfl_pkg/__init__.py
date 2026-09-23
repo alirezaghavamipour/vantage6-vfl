@@ -6,3 +6,5 @@ from .train_vanilla import vanilla_train_worker_run, vanilla_train_coordinator_r
 from .central_train_vanilla import central_train_aggvflc_vanilla
 from .train_aggvfl_vanilla import vanilla_train_aggvfl_worker_run, vanilla_train_aggvfl_coordinator_run
 from .central_train_aggvfl_vanilla import central_train_aggvfl_vanilla
+from .train_aggvfl import train_client_run_aggvfl, train_party_run_aggvfl
+from .central_train_aggvfl import central_train_aggvfl
