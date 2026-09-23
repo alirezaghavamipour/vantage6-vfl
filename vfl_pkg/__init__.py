@@ -10,3 +10,5 @@ from .train_aggvfl import train_client_run_aggvfl, train_party_run_aggvfl
 from .central_train_aggvfl import central_train_aggvfl
 from .train_splitvflc_vanilla import vanilla_train_splitvflc_bottom_run, vanilla_train_splitvflc_top_run
 from .central_train_splitvflc_vanilla import central_train_splitvflc_vanilla
+from .train_splitvflc import train_client_run_splitvflc, train_party_run_splitvflc
+from .central_train_splitvflc import central_train_splitvflc
