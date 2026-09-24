@@ -19,7 +19,8 @@ VANILLA_TIMEOUT = 1800
 SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
 
-def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2) -> dict:
+def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2,
+             run_id: str = None) -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -32,6 +33,13 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
         "method": matching_method,
         "fuzzy_threshold": fuzzy_threshold,
     }
+    # run_id ties every job dispatched by one orchestrator call together
+    # across however many hosts they land on - job_id alone is only
+    # unique to this one job, with nothing connecting it to its siblings
+    # from the same run. Optional/None for direct/manual invocation
+    # outside an orchestrator.
+    if run_id:
+        job["run_id"] = run_id
     os.makedirs(JOBS_DIR, exist_ok=True)
     with open(os.path.join(JOBS_DIR, job_id + ".json"), "w") as f:
         json.dump(job, f)
@@ -50,7 +58,8 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     raise TimeoutError(f"Vanilla train: host daemon did not respond to job {job_id} within {VANILLA_TIMEOUT}s")
 
 
-def vanilla_train_worker_run(matching_method: str = "exact", fuzzy_threshold: int = 2):
+def vanilla_train_worker_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
+                    run_id: str = None):
     """NOT PRIVATE - deliberately insecure baseline for comparison
     against vantage6-vfl's real (Rep3 MPC) aggVFLc training only.
 
@@ -65,10 +74,11 @@ def vanilla_train_worker_run(matching_method: str = "exact", fuzzy_threshold: in
     Label Inference risk. Invoked internally by
     'central_train_aggvflc_vanilla', not meant to be run standalone.
     """
-    return _run_job("vanilla_train_worker_run", matching_method, fuzzy_threshold)
+    return _run_job("vanilla_train_worker_run", matching_method, fuzzy_threshold, run_id)
 
 
-def vanilla_train_coordinator_run(matching_method: str = "exact", fuzzy_threshold: int = 2):
+def vanilla_train_coordinator_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
+                    run_id: str = None):
     """NOT PRIVATE - deliberately insecure baseline for comparison
     against vantage6-vfl's real (Rep3 MPC) aggVFLc training only.
 
@@ -81,4 +91,4 @@ def vanilla_train_coordinator_run(matching_method: str = "exact", fuzzy_threshol
     epoch. Invoked internally by 'central_train_aggvflc_vanilla', not
     meant to be run standalone.
     """
-    return _run_job("vanilla_train_coordinator_run", matching_method, fuzzy_threshold)
+    return _run_job("vanilla_train_coordinator_run", matching_method, fuzzy_threshold, run_id)

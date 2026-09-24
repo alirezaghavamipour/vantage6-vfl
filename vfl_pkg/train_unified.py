@@ -1,3 +1,5 @@
+import uuid
+
 from vantage6.algorithm.tools.decorators import algorithm_client
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.util import info
@@ -138,11 +140,18 @@ def central_train(
         )
 
     spec = _ARCHITECTURES[architecture][privacy_mode]
-    kwargs = {"matching_method": matching_method, "fuzzy_threshold": fuzzy_threshold}
+    # Ties every job this run dispatches - across every feature, label,
+    # and computing party host - back to this one orchestrated run, so
+    # anyone debugging the daemon-bridge job files on disk (which have
+    # no other way to tell which host's job belongs to which run) can
+    # find every piece of it. Also logged below and returned in the
+    # summary.
+    run_id = str(uuid.uuid4())
+    kwargs = {"matching_method": matching_method, "fuzzy_threshold": fuzzy_threshold, "run_id": run_id}
     client_org_ids = list(feature_org_ids) + [label_org_id]
 
     info(f"Central (train {architecture}, {privacy_mode}): starting training run "
-         f"(method={matching_method}, fuzzy_threshold={fuzzy_threshold}) - "
+         f"(run_id={run_id}, method={matching_method}, fuzzy_threshold={fuzzy_threshold}) - "
          f"features={feature_org_ids}, label={label_org_id}, aggregators={agg_org_ids}")
 
     tasks = {}
@@ -216,6 +225,7 @@ def central_train(
 
     output = {
         "summary": [
+            {"metric": "run_id", "value": run_id},
             {"metric": "architecture", "value": architecture},
             {"metric": "privacy_mode", "value": privacy_mode},
             {"metric": "matching_method", "value": matching_method},
@@ -224,6 +234,7 @@ def central_train(
             {"metric": "predictions_agree", "value": predictions_agree},
             {"metric": "aggregators_ok", "value": aggregators_ok},
         ],
+        "run_id": run_id,
         "architecture": architecture,
         "privacy_mode": privacy_mode,
         "matching_method": matching_method,

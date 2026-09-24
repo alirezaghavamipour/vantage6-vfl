@@ -22,7 +22,8 @@ TIMEOUT_BY_METHOD = {"exact": 120, "fuzzy": 1500}
 SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
 
-def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2) -> dict:
+def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2,
+             run_id: str = None) -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -35,11 +36,18 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
         "method": matching_method,
         "fuzzy_threshold": fuzzy_threshold,
     }
+    # run_id ties every job dispatched by one orchestrator call (central())
+    # together across however many hosts they land on - job_id alone is
+    # only unique to this one job, with nothing connecting it to its
+    # siblings from the same run. Optional/None for direct/manual
+    # invocation outside an orchestrator.
+    if run_id:
+        job["run_id"] = run_id
     timeout = TIMEOUT_BY_METHOD.get(matching_method, 120)
     os.makedirs(JOBS_DIR, exist_ok=True)
     with open(os.path.join(JOBS_DIR, job_id + ".json"), "w") as f:
         json.dump(job, f)
-    info(f"PSI: submitted job {job_id} ({action}, method={matching_method}, "
+    info(f"PSI: submitted job {job_id} (run_id={run_id}, {action}, method={matching_method}, "
          f"fuzzy_threshold={fuzzy_threshold}), waiting for host daemon...")
 
     result_path = os.path.join(RESULTS_DIR, job_id + ".json")
@@ -54,7 +62,8 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     raise TimeoutError(f"PSI: host daemon did not respond to job {job_id} within {timeout}s")
 
 
-def psi_client_share(matching_method: str = "exact", fuzzy_threshold: int = 2):
+def psi_client_share(matching_method: str = "exact", fuzzy_threshold: int = 2,
+                      run_id: str = None):
     """Feature/label party: share local entity data into the MPC computation.
 
     matching_method: "exact" (hash-based exact match) or "fuzzy"
@@ -62,10 +71,18 @@ def psi_client_share(matching_method: str = "exact", fuzzy_threshold: int = 2):
     fuzzy_threshold: max character edits allowed (1, 2, or 3) when
     matching_method="fuzzy" - higher tolerates more typos but also risks
     matching different people with similar names. Ignored for "exact".
+    run_id: shared identifier set by central() to correlate this job with
+    the other jobs dispatched by the same orchestrated run, across every
+    host they land on. Not meant to be set when calling this directly.
     """
-    return _run_job("psi_client_run", matching_method, fuzzy_threshold)
+    return _run_job("psi_client_run", matching_method, fuzzy_threshold, run_id)
 
 
-def psi_party_run(matching_method: str = "exact", fuzzy_threshold: int = 2):
-    """Computing party: run this party's role in the Rep3 PSI computation."""
-    return _run_job("psi_party_run", matching_method, fuzzy_threshold)
+def psi_party_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
+                   run_id: str = None):
+    """Computing party: run this party's role in the Rep3 PSI computation.
+
+    run_id: see psi_client_share - shared identifier set by central() for
+    cross-host job correlation.
+    """
+    return _run_job("psi_party_run", matching_method, fuzzy_threshold, run_id)

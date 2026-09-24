@@ -1,3 +1,5 @@
+import uuid
+
 from vantage6.algorithm.tools.decorators import algorithm_client
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.util import info
@@ -48,10 +50,17 @@ def central(
             f"(choose one of {SUPPORTED_FUZZY_THRESHOLDS})"
         )
 
-    info(f"Central: starting PSI run (method={matching_method}, fuzzy_threshold={fuzzy_threshold}) "
-         f"- clients={client_org_ids}, aggregators={agg_org_ids}")
+    # Ties every job this run dispatches - across all client and
+    # aggregator hosts - back to this one orchestrated run, so anyone
+    # debugging the daemon-bridge job files on disk (which have no other
+    # way to tell which host's job belongs to which run) can find every
+    # piece of it. Also logged below and returned in the summary.
+    run_id = str(uuid.uuid4())
 
-    kwargs = {"matching_method": matching_method, "fuzzy_threshold": fuzzy_threshold}
+    info(f"Central: starting PSI run (run_id={run_id}, method={matching_method}, "
+         f"fuzzy_threshold={fuzzy_threshold}) - clients={client_org_ids}, aggregators={agg_org_ids}")
+
+    kwargs = {"matching_method": matching_method, "fuzzy_threshold": fuzzy_threshold, "run_id": run_id}
 
     tasks = {}
     for org_id in client_org_ids:
@@ -104,11 +113,13 @@ def central(
 
     output = {
         "summary": [
+            {"metric": "run_id", "value": run_id},
             {"metric": "matching_method", "value": matching_method},
             {"metric": "fuzzy_threshold", "value": fuzzy_threshold if matching_method == "fuzzy" else None},
             {"metric": "intersection_size", "value": intersection_size},
             {"metric": "clients_agree", "value": clients_agree},
         ],
+        "run_id": run_id,
         "matching_method": matching_method,
         "fuzzy_threshold": fuzzy_threshold if matching_method == "fuzzy" else None,
         "intersection_size": intersection_size,
