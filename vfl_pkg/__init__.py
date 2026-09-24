@@ -1,4 +1,5 @@
 from .psi import psi_client_share, psi_party_run
+from .schema import report_schema_run
 from .central import central
 from .train_unified import central_train
 from .train import train_client_run, train_party_run

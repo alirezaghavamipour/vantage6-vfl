@@ -149,10 +149,60 @@ def central_train(
     run_id = str(uuid.uuid4())
     kwargs = {"matching_method": matching_method, "fuzzy_threshold": fuzzy_threshold, "run_id": run_id}
     client_org_ids = list(feature_org_ids) + [label_org_id]
+    label_has_features = architecture in ("aggVFL", "splitVFL")
 
     info(f"Central (train {architecture}, {privacy_mode}): starting training run "
          f"(run_id={run_id}, method={matching_method}, fuzzy_threshold={fuzzy_threshold}) - "
          f"features={feature_org_ids}, label={label_org_id}, aggregators={agg_org_ids}")
+
+    # Schema discovery: before dispatching training, ask each party to
+    # report its own row count and feature-column count (read straight
+    # from its CSV) - lets the aggregators learn this run's actual
+    # circuit shape instead of assuming today's fixed 171-row/13-feature
+    # dataset, and recompile their training circuit only when the shape
+    # actually differs from what's already compiled (see
+    # ensure_circuit_compiled on the aggregator daemon). Only meaningful
+    # for the secure/MPC path - the non_secure vanilla path already
+    # discovers its own columns locally at training time and has no
+    # circuit to recompile.
+    agg_kwargs = dict(kwargs)
+    if privacy_mode == "secure":
+        fp1_org, fp2_org = feature_org_ids[0], feature_org_ids[1]
+        # The label party's own dataset only carries real feature columns
+        # in the "heart_vfl_aggvfl" database (aggVFL/splitVFL); the plain
+        # "heart_vfl" database gives it target+full_name only, which
+        # report_schema correctly reports as 0 features.
+        fp2_database = "heart_vfl_aggvfl" if label_has_features else "heart_vfl"
+        lp_database = "heart_vfl_aggvfl" if label_has_features else "heart_vfl"
+
+        schema_tasks = {
+            fp1_org: client.task.create(
+                input_={"method": "report_schema_run", "kwargs": {"database": "heart_vfl", "run_id": run_id}},
+                organizations=[fp1_org], name=f"schema-{architecture}-{fp1_org}",
+            )["id"],
+            fp2_org: client.task.create(
+                input_={"method": "report_schema_run", "kwargs": {"database": fp2_database, "run_id": run_id}},
+                organizations=[fp2_org], name=f"schema-{architecture}-{fp2_org}",
+            )["id"],
+            label_org_id: client.task.create(
+                input_={"method": "report_schema_run", "kwargs": {"database": lp_database, "run_id": run_id}},
+                organizations=[label_org_id], name=f"schema-{architecture}-{label_org_id}",
+            )["id"],
+        }
+        schema_results = {org_id: client.wait_for_results(task_id=task_id)[0]
+                           for org_id, task_id in schema_tasks.items()}
+        n_feat_a = schema_results[fp1_org]["n_features"]
+        n_feat_b = schema_results[fp2_org]["n_features"]
+        n_feat_c = schema_results[label_org_id]["n_features"] if label_has_features else 0
+        # No row-padding/masking yet, so the compiled circuit's row count
+        # must be a value every party can actually supply - the smallest
+        # party's own row count is a safe upper bound, since the true
+        # matched intersection can never exceed it.
+        n_samples = min(schema_results[org_id]["n_rows"] for org_id in schema_tasks)
+        schema = {"n_samples": n_samples, "n_feat_a": n_feat_a, "n_feat_b": n_feat_b,
+                  "n_feat_c": n_feat_c, "n_epochs": 200}
+        agg_kwargs["schema"] = schema
+        info(f"Central (train {architecture}, {privacy_mode}): discovered schema {schema}")
 
     tasks = {}
     if privacy_mode == "secure":
@@ -165,7 +215,7 @@ def central_train(
             tasks[org_id] = t["id"]
         for org_id in agg_org_ids:
             t = client.task.create(
-                input_={"method": spec["agg_action"], "kwargs": kwargs},
+                input_={"method": spec["agg_action"], "kwargs": agg_kwargs},
                 organizations=[org_id],
                 name=f"train-{architecture}-agg-{org_id}",
             )

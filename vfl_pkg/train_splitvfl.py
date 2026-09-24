@@ -19,7 +19,7 @@ SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
 
 def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2,
-             run_id: str = None) -> dict:
+             run_id: str = None, schema: dict = None) -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -39,6 +39,12 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     # outside an orchestrator.
     if run_id:
         job["run_id"] = run_id
+    # schema: this run's actual circuit shape, discovered by
+    # central_train from the real data - None falls back to the
+    # known-working default shape (see ensure_circuit_compiled on the
+    # computing party's daemon).
+    if schema:
+        job["schema"] = schema
     os.makedirs(JOBS_DIR, exist_ok=True)
     with open(os.path.join(JOBS_DIR, job_id + ".json"), "w") as f:
         json.dump(job, f)
@@ -76,11 +82,14 @@ def train_client_run_splitvfl(matching_method: str = "exact", fuzzy_threshold: i
 
 
 def train_party_run_splitvfl(matching_method: str = "exact", fuzzy_threshold: int = 2,
-                    run_id: str = None):
+                    run_id: str = None, schema: dict = None):
     """Computing party: run this party's role in the Rep3 splitVFL
     training computation (trainable-module vertical FL; the label
     party contributes features too, same as aggVFL). This computing
     party never sees any feature, label, or prediction - only its own
     secret share of the computation.
+
+    schema: this run's discovered circuit shape - None uses the
+    known-working default shape.
     """
-    return _run_job("train_party_run_splitvfl", matching_method, fuzzy_threshold, run_id)
+    return _run_job("train_party_run_splitvfl", matching_method, fuzzy_threshold, run_id, schema)

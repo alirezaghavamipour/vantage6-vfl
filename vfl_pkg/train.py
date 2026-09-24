@@ -21,7 +21,8 @@ TRAIN_TIMEOUT = 5000
 SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
 
-def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2) -> dict:
+def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2,
+             run_id: str = None, schema: dict = None) -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -34,6 +35,19 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
         "method": matching_method,
         "fuzzy_threshold": fuzzy_threshold,
     }
+    # run_id ties every job dispatched by one orchestrator call (central_train())
+    # together across however many hosts they land on - job_id alone is only
+    # unique to this one job. Optional/None for direct/manual invocation.
+    if run_id:
+        job["run_id"] = run_id
+    # schema: this run's actual circuit shape (row-count bound, per-party
+    # feature counts, epochs), discovered by central_train from the real
+    # data instead of assumed fixed - lets the computing party's
+    # ensure_circuit_compiled regenerate/recompile only when it actually
+    # differs from what's already compiled. None falls back to today's
+    # known-working 171-row/13-feature/200-epoch shape.
+    if schema:
+        job["schema"] = schema
     os.makedirs(JOBS_DIR, exist_ok=True)
     with open(os.path.join(JOBS_DIR, job_id + ".json"), "w") as f:
         json.dump(job, f)
@@ -52,7 +66,8 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     raise TimeoutError(f"Train: host daemon did not respond to job {job_id} within {TRAIN_TIMEOUT}s")
 
 
-def train_client_run(matching_method: str = "exact", fuzzy_threshold: int = 2):
+def train_client_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
+                      run_id: str = None):
     """Feature/label party: align rows and share this party's own columns
     into the aggVFLc training computation.
 
@@ -67,15 +82,22 @@ def train_client_run(matching_method: str = "exact", fuzzy_threshold: int = 2):
     (nickname-canonicalized, typo-tolerant edit-distance match - see
     vantage6-vfl-psi for details). fuzzy_threshold: 1, 2, or 3 - only
     used when matching_method="fuzzy".
+    run_id: shared identifier set by central_train to correlate this job
+    with the other jobs dispatched by the same orchestrated run.
     """
-    return _run_job("train_client_run", matching_method, fuzzy_threshold)
+    return _run_job("train_client_run", matching_method, fuzzy_threshold, run_id)
 
 
-def train_party_run(matching_method: str = "exact", fuzzy_threshold: int = 2):
+def train_party_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
+                     run_id: str = None, schema: dict = None):
     """Computing party: run this party's role in the Rep3 aggVFLc
     training computation (fixed-aggregation vertical logistic
     regression; the label party contributes no features of its own).
     This computing party never sees any feature, label, or prediction -
     only its own secret share of the computation.
+
+    run_id: see train_client_run. schema: this run's discovered circuit
+    shape (see central_train's schema-discovery step) - None uses the
+    known-working default shape.
     """
-    return _run_job("train_party_run", matching_method, fuzzy_threshold)
+    return _run_job("train_party_run", matching_method, fuzzy_threshold, run_id, schema)
