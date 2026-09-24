@@ -105,13 +105,21 @@ def central_train(
     matching_method / fuzzy_threshold: see 'Run private PSI' for the
     full explanation of exact vs. fuzzy entity matching.
 
-    Predictions are revealed identically to every client party, so each
-    one can independently verify the trained model - this function
-    cross-checks that they all agree.
+    Predictions are revealed identically to every client party (feature
+    and label parties alike), so each one can independently verify the
+    trained model - this function cross-checks that they all agree.
+    That reveal happens regardless of this function's own arguments; it
+    is a property of the training circuit itself, not of this
+    orchestrator.
 
-    By default only the merged summary is returned. Set debug=True to
-    also include the full per-party results, for auditing one specific
-    run.
+    By default this function itself returns only a summary (aligned row
+    count, whether the parties' predictions agreed, whether the
+    computing parties completed successfully) - not the raw per-row
+    predictions themselves, since the task submitter is not necessarily
+    one of the data-holding organizations and has no inherent need to
+    see every row's predicted label. Set debug=True to also include the
+    full per-party results (including the raw predictions), for
+    auditing one specific run.
     """
     if architecture not in _ARCHITECTURES:
         raise ValueError(
@@ -223,10 +231,10 @@ def central_train(
         "aligned_count": aligned_count,
         "predictions_agree": predictions_agree,
         "aggregators_ok": aggregators_ok,
-        "predictions": next(iter(predictions_by_org.values()), None),
     }
 
     if debug:
+        output["predictions"] = next(iter(predictions_by_org.values()), None)
         output["client_results"] = {org_id: results.get(org_id) for org_id in client_org_ids}
         output["aggregator_results"] = {org_id: results.get(org_id) for org_id in agg_org_ids}
 
