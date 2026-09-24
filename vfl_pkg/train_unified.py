@@ -68,6 +68,7 @@ def central_train(
     privacy_mode: str = "secure",
     matching_method: str = "exact",
     fuzzy_threshold: int = 2,
+    n_samples: int = None,
     debug: bool = False,
 ):
     """
@@ -106,6 +107,21 @@ def central_train(
 
     matching_method / fuzzy_threshold: see 'Run private PSI' for the
     full explanation of exact vs. fuzzy entity matching.
+
+    n_samples (secure mode only): the exact number of matched rows the
+    computing parties should compile their training circuit for. Every
+    other structural fact (how many feature columns each party holds)
+    is discovered automatically from the data before training - only
+    the row count needs to be supplied explicitly, because it must
+    equal the TRUE matched intersection size exactly (there is no
+    row-padding yet, so an over- or under-sized circuit will fail to
+    train), and that size can only be known by actually running PSI
+    first. Run 'Run private PSI' (or a prior call to this function) to
+    learn the real intersection_size, then pass it here. Leaving this
+    at its default (None) skips recompiling for a new shape entirely
+    and keeps the computing parties' current default row count (171,
+    today's known-working value) - the safe choice when training on the
+    same dataset as before.
 
     Predictions are revealed identically to every client party (feature
     and label parties alike), so each one can independently verify the
@@ -194,15 +210,27 @@ def central_train(
         n_feat_a = schema_results[fp1_org]["n_features"]
         n_feat_b = schema_results[fp2_org]["n_features"]
         n_feat_c = schema_results[label_org_id]["n_features"] if label_has_features else 0
-        # No row-padding/masking yet, so the compiled circuit's row count
-        # must be a value every party can actually supply - the smallest
-        # party's own row count is a safe upper bound, since the true
-        # matched intersection can never exceed it.
-        n_samples = min(schema_results[org_id]["n_rows"] for org_id in schema_tasks)
-        schema = {"n_samples": n_samples, "n_feat_a": n_feat_a, "n_feat_b": n_feat_b,
-                  "n_feat_c": n_feat_c, "n_epochs": 200}
-        agg_kwargs["schema"] = schema
-        info(f"Central (train {architecture}, {privacy_mode}): discovered schema {schema}")
+        # Feature counts are safe to auto-discover: each party's CSV
+        # physically holds only its own columns, so "how many" is a
+        # stable fact about the data regardless of which rows end up
+        # matched. Row count is NOT safe to guess the same way - without
+        # row-padding/masking (not yet built), the compiled circuit's row
+        # count must equal the TRUE PSI-matched intersection size
+        # exactly, which is smaller than any single party's raw row count
+        # (PSI's whole job is finding that shared subset) and can only be
+        # known by actually running PSI. So n_samples is an explicit
+        # argument the caller supplies (e.g. from a prior 'Run private
+        # PSI' call's reported intersection_size) rather than guessed
+        # here - omitting it keeps today's proven default shape.
+        if n_samples is not None:
+            schema = {"n_samples": n_samples, "n_feat_a": n_feat_a, "n_feat_b": n_feat_b,
+                      "n_feat_c": n_feat_c, "n_epochs": 200}
+            agg_kwargs["schema"] = schema
+            info(f"Central (train {architecture}, {privacy_mode}): discovered schema {schema}")
+        else:
+            info(f"Central (train {architecture}, {privacy_mode}): discovered feature counts "
+                 f"n_feat_a={n_feat_a}, n_feat_b={n_feat_b}, n_feat_c={n_feat_c} - "
+                 f"n_samples not given, keeping the computing parties' current default row count")
 
     tasks = {}
     if privacy_mode == "secure":
