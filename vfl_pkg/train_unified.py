@@ -69,6 +69,7 @@ def central_train(
     matching_method: str = "exact",
     fuzzy_threshold: int = 2,
     n_samples: int = None,
+    algorithm: str = "logistic",
     debug: bool = False,
 ):
     """
@@ -127,6 +128,19 @@ def central_train(
     change (all parties' daemons are deployed by the same operator),
     not something to set per task.
 
+    algorithm (secure mode only):
+      - 'logistic' (default): binary classification - the label must be
+        an exact 0/1 value, predictions are 0/1 classifications.
+      - 'linear': regression - the label is a continuous value,
+        normalized and fixed-point encoded the same way every feature
+        column already is. Predictions come back as NORMALIZED values
+        (not yet scaled to the label's real units) so every party
+        reports an identical number - only the label party's own
+        result also includes 'label_max', since it's the only party
+        that ever learns the label's true scale; multiply a normalized
+        prediction by label_max to get the value in real units. Not yet
+        available for privacy_mode='non_secure'.
+
     Predictions are revealed identically to every client party (feature
     and label parties alike), so each one can independently verify the
     trained model - this function cross-checks that they all agree.
@@ -157,6 +171,16 @@ def central_train(
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
             f"(choose one of {SUPPORTED_FUZZY_THRESHOLDS})"
+        )
+    if algorithm not in ("logistic", "linear"):
+        raise ValueError(
+            f"algorithm={algorithm!r} is not supported "
+            f"(choose 'logistic' or 'linear')"
+        )
+    if algorithm == "linear" and privacy_mode == "non_secure":
+        raise ValueError(
+            "algorithm='linear' is only implemented for privacy_mode='secure' "
+            "so far - the non_secure vanilla baseline is still logistic-only"
         )
 
     spec = _ARCHITECTURES[architecture][privacy_mode]
@@ -226,9 +250,17 @@ def central_train(
         # argument the caller supplies (e.g. from a prior 'Run private
         # PSI' call's reported intersection_size) rather than guessed
         # here - omitting it keeps today's proven default shape.
-        if n_samples is not None:
-            schema = {"n_samples": n_samples, "n_feat_a": n_feat_a, "n_feat_b": n_feat_b,
-                      "n_feat_c": n_feat_c, "n_epochs": 200}
+        # A schema override is needed whenever either the row-count bound
+        # or the algorithm differs from the computing parties' current
+        # default (n_samples=200, algorithm='logistic') - both actually
+        # change the compiled circuit, unlike feature counts which are
+        # always safe to just discover and send.
+        if n_samples is not None or algorithm != "logistic":
+            schema = {
+                "n_samples": n_samples if n_samples is not None else 200,
+                "n_feat_a": n_feat_a, "n_feat_b": n_feat_b, "n_feat_c": n_feat_c,
+                "n_epochs": 200, "algorithm": algorithm,
+            }
             agg_kwargs["schema"] = schema
             info(f"Central (train {architecture}, {privacy_mode}): discovered schema {schema}")
         else:
@@ -236,11 +268,17 @@ def central_train(
                  f"n_feat_a={n_feat_a}, n_feat_b={n_feat_b}, n_feat_c={n_feat_c} - "
                  f"n_samples not given, keeping the computing parties' current default row count")
 
+    # algorithm is only a valid kwarg for the secure client actions - the
+    # non_secure vanilla worker/coordinator functions don't accept it
+    # (validated above: algorithm='linear' is already rejected together
+    # with privacy_mode='non_secure').
+    client_kwargs = dict(kwargs, algorithm=algorithm) if privacy_mode == "secure" else kwargs
+
     tasks = {}
     if privacy_mode == "secure":
         for org_id in client_org_ids:
             t = client.task.create(
-                input_={"method": spec["client_action"], "kwargs": kwargs},
+                input_={"method": spec["client_action"], "kwargs": client_kwargs},
                 organizations=[org_id],
                 name=f"train-{architecture}-client-{org_id}",
             )
