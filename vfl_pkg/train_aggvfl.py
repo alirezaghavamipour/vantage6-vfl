@@ -19,7 +19,7 @@ SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
 def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2,
              run_id: str = None, schema: dict = None, algorithm: str = None,
-             n_samples_bound: int = None, max_entities: int = None) -> dict:
+             n_samples_bound: int = None, max_entities: int = None, debug: bool = False) -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -56,6 +56,8 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
         job["n_samples_bound"] = n_samples_bound
     if max_entities:
         job["max_entities"] = max_entities
+    if debug:
+        job["debug"] = True
     os.makedirs(JOBS_DIR, exist_ok=True)
     with open(os.path.join(JOBS_DIR, job_id + ".json"), "w") as f:
         json.dump(job, f)
@@ -76,7 +78,7 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
 
 def train_client_run_aggvfl(matching_method: str = "exact", fuzzy_threshold: int = 2,
                     run_id: str = None, algorithm: str = None, n_samples_bound: int = None,
-                    max_entities: int = None):
+                    max_entities: int = None, debug: bool = False):
     """Feature/label party: align rows and share this party's own
     columns into the aggVFL training computation (Rep3 MPC - private).
 
@@ -88,7 +90,8 @@ def train_client_run_aggvfl(matching_method: str = "exact", fuzzy_threshold: int
     algorithm/n_samples_bound/max_entities: see train_client_run (train.py).
     """
     return _run_job("train_client_run_aggvfl", matching_method, fuzzy_threshold, run_id,
-                     algorithm=algorithm, n_samples_bound=n_samples_bound, max_entities=max_entities)
+                     algorithm=algorithm, n_samples_bound=n_samples_bound, max_entities=max_entities,
+                     debug=debug)
 
 
 def train_party_run_aggvfl(matching_method: str = "exact", fuzzy_threshold: int = 2,

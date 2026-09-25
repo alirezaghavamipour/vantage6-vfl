@@ -23,7 +23,7 @@ SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
 
 def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2,
-             run_id: str = None, max_entities: int = None) -> dict:
+             run_id: str = None, max_entities: int = None, debug: bool = False) -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -36,6 +36,12 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
         "method": matching_method,
         "fuzzy_threshold": fuzzy_threshold,
     }
+    # Whether this party's own subtask result may include row-level
+    # sensitive data (matched names). Independent of any debug filtering
+    # central()/central_train() apply to their own top-level summary -
+    # this subtask's result is separately queryable in vantage6.
+    if debug:
+        job["debug"] = True
     # run_id ties every job dispatched by one orchestrator call (central())
     # together across however many hosts they land on - job_id alone is
     # only unique to this one job, with nothing connecting it to its
@@ -70,7 +76,7 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
 
 
 def psi_client_share(matching_method: str = "exact", fuzzy_threshold: int = 2,
-                      run_id: str = None, max_entities: int = None):
+                      run_id: str = None, max_entities: int = None, debug: bool = False):
     """Feature/label party: share local entity data into the MPC computation.
 
     matching_method: "exact" (hash-based exact match) or "fuzzy"
@@ -84,8 +90,13 @@ def psi_client_share(matching_method: str = "exact", fuzzy_threshold: int = 2,
     max_entities: this run's row-count bound, if central()'s schema
     discovery raised it above the default - None uses this daemon's own
     local default (320).
+    debug: if True, this party's own result includes the matched names/
+    align keys it discovered. Off by default - those fields aren't used
+    by central()'s own aggregation (it only needs intersection_size), so
+    leaving this False keeps them out of this subtask's stored result
+    too, not just out of central()'s filtered top-level summary.
     """
-    return _run_job("psi_client_run", matching_method, fuzzy_threshold, run_id, max_entities)
+    return _run_job("psi_client_run", matching_method, fuzzy_threshold, run_id, max_entities, debug)
 
 
 def psi_party_run(matching_method: str = "exact", fuzzy_threshold: int = 2,

@@ -301,7 +301,13 @@ def central_train(
     # to their own unchanged local default, causing a data-length
     # mismatch (the exact bug the schema-only version of this had).
     if privacy_mode == "secure":
-        client_kwargs = dict(kwargs, algorithm=algorithm, max_entities=max_entities)
+        # debug is threaded down to each client party's own subtask (not
+        # just used below to filter central_train()'s own top-level
+        # output) since that subtask's result is independently queryable
+        # in vantage6 regardless of what central_train() itself returns -
+        # without this, debug=False here would still leave raw
+        # predictions sitting in every client subtask's own result.
+        client_kwargs = dict(kwargs, algorithm=algorithm, max_entities=max_entities, debug=debug)
         if n_samples is not None:
             client_kwargs["n_samples_bound"] = n_samples
     else:
@@ -355,16 +361,30 @@ def central_train(
         results[org_id] = res[0] if res else None
 
     aligned_count = None
+    # secure mode: client subtasks now report a predictions_hash instead
+    # of raw predictions unless debug=True (see _redact_training_result
+    # in mpc_daemon_client_v2.py) - Rep3's correctness cross-check only
+    # needs to confirm every client's predictions came out byte-identical,
+    # not what they actually are, so comparing hashes works the same
+    # whether or not debug also requested the raw values. non_secure
+    # (vanilla) mode's leak is deliberately left as-is for now (already
+    # documented as insecure-by-design), so its subtasks still return raw
+    # predictions with no hash - compared directly as before.
     predictions_by_org = {}
     for org_id in client_org_ids:
         r = results.get(org_id)
         if r and r.get("status") == "complete":
-            predictions_by_org[org_id] = r.get("predictions")
+            predictions_by_org[org_id] = (
+                r.get("predictions_hash") if privacy_mode == "secure" else r.get("predictions")
+            )
             if aligned_count is None:
                 aligned_count = r.get("aligned_count")
 
+    def _agree_key(p):
+        return p if privacy_mode == "secure" else tuple(p)
+
     predictions_agree = (
-        len({tuple(p) for p in predictions_by_org.values() if p is not None}) <= 1
+        len({_agree_key(p) for p in predictions_by_org.values() if p is not None}) <= 1
         if predictions_by_org else None
     )
 
@@ -398,7 +418,15 @@ def central_train(
     }
 
     if debug:
-        output["predictions"] = next(iter(predictions_by_org.values()), None)
+        # secure mode: raw predictions are only present in a client
+        # subtask's own result when debug=True made it all the way down
+        # to that party (see client_kwargs above) - non_secure mode
+        # never redacted them in the first place.
+        output["predictions"] = next(
+            (results[org_id].get("predictions") for org_id in client_org_ids
+             if results.get(org_id) and results[org_id].get("predictions") is not None),
+            None,
+        )
         output["client_results"] = {org_id: results.get(org_id) for org_id in client_org_ids}
         output["aggregator_results"] = {org_id: results.get(org_id) for org_id in agg_org_ids}
 

@@ -85,10 +85,19 @@ def central(
     info(f"Central: discovered raw row counts {raw_row_counts}, using PSI bound max_entities={max_entities}")
     kwargs["max_entities"] = max_entities
 
+    # debug is threaded down to each client party's own subtask (not just
+    # used below to filter central()'s own top-level output) since that
+    # subtask's result is independently queryable in vantage6 regardless
+    # of what central() itself returns. psi_party_run doesn't accept a
+    # debug kwarg (aggregators never see matched names either way), so
+    # this only applies to the client-share kwargs, not the shared dict
+    # used for the aggregator loop below.
+    client_kwargs = dict(kwargs, debug=debug)
+
     tasks = {}
     for org_id in client_org_ids:
         t = client.task.create(
-            input_={"method": "psi_client_share", "kwargs": kwargs},
+            input_={"method": "psi_client_share", "kwargs": client_kwargs},
             organizations=[org_id],
             name=f"psi-client-{org_id}",
         )
