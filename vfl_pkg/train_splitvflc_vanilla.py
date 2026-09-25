@@ -70,6 +70,14 @@ def vanilla_train_splitvflc_bottom_run(matching_method: str = "exact", fuzzy_thr
     since embeddings can leak more information than a single score.
     Invoked internally by 'central_train_splitvflc_vanilla', not meant
     to be run standalone.
+
+    NOT an unencrypted mirror of the secure splitVFLc circuit: this
+    trains its own separate per-party bottom model, while the secure
+    circuit trains one joint hidden layer over every party's
+    concatenated features - see central_train's docstring
+    (train_unified.py) for the full explanation. Don't compare
+    predictions/accuracy between this and secure splitVFLc as a
+    correctness check.
     """
     return _run_job("vanilla_train_splitvflc_bottom_run", matching_method, fuzzy_threshold, run_id)
 

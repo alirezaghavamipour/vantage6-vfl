@@ -82,11 +82,28 @@ def central_train(
         party has no features of its own (the simplest architecture).
       - 'aggVFL': same fixed aggregation, but the label party ALSO
         contributes its own features to the model.
-      - 'splitVFLc': trainable-module SplitNN (a real small neural
-        network - Dense+ReLU hidden layer, Dense+Sigmoid output),
-        label party has no features of its own.
-      - 'splitVFL': trainable-module SplitNN, label party also
+      - 'splitVFLc': trainable-module network (Dense+ReLU hidden layer,
+        Dense+Sigmoid output), label party has no features of its own.
+      - 'splitVFL': trainable-module network, label party also
         contributes its own features.
+
+    IMPORTANT - splitVFLc/splitVFL are NOT the same model in both
+    privacy_mode values, unlike aggVFLc/aggVFL: secure mode trains ONE
+    joint Dense+ReLU hidden layer over every party's concatenated
+    features inside the MPC circuit (a single shared weight matrix);
+    non_secure mode instead runs a genuine SplitNN, where each feature
+    party trains its OWN separate bottom Dense+ReLU on only its own
+    columns (independent weight matrices, no shared parameters) and
+    exchanges the resulting embedding/gradient vectors with the label
+    party's top model in the clear each epoch. Different parameter
+    counts, different information flow, different learning dynamics -
+    running the same data through both modes and comparing predictions
+    or accuracy is NOT a valid secure-vs-insecure sanity check for
+    these two architectures (it is for aggVFLc/aggVFL, whose non_secure
+    path is a direct plaintext replica of the same single-layer math
+    the MPC circuit computes). Treat splitVFLc/splitVFL's non_secure
+    mode as its own separate insecure SplitNN baseline, not as an
+    unencrypted mirror of the secure model.
 
     privacy_mode:
       - 'secure': the real thing - all training happens inside a Rep3

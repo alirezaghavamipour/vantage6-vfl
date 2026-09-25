@@ -109,5 +109,12 @@ def train_party_run_splitvflc(matching_method: str = "exact", fuzzy_threshold: i
     schema: this run's discovered circuit shape - None uses the
     known-working default shape. max_entities: PSI's own row-count
     bound - None uses this daemon's own local default.
+
+    This circuit is ONE joint Dense+ReLU hidden layer over every
+    party's concatenated features (a single shared weight matrix) -
+    NOT the same model as splitVFLc's non_secure baseline, which trains
+    a genuine per-party SplitNN instead. See central_train's docstring
+    (train_unified.py) before comparing accuracy/predictions across
+    privacy_mode for this architecture.
     """
     return _run_job("train_party_run_splitvflc", matching_method, fuzzy_threshold, run_id, schema, max_entities=max_entities)

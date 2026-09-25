@@ -68,6 +68,12 @@ def vanilla_train_splitvfl_bottom_run(matching_method: str = "exact", fuzzy_thre
     differ (splitVFL moves some columns from a feature party to the
     label party, same split as aggVFL). Invoked internally by
     'central_train_splitvfl_vanilla', not meant to be run standalone.
+
+    NOT an unencrypted mirror of the secure splitVFL circuit - see
+    train_unified.py's central_train docstring: this trains a separate
+    per-party bottom model, while the secure circuit trains one joint
+    hidden layer over every party's concatenated features. Don't
+    compare predictions/accuracy between the two as a correctness check.
     """
     return _run_job("vanilla_train_splitvfl_bottom_run", matching_method, fuzzy_threshold, run_id)
 
@@ -89,5 +95,11 @@ def vanilla_train_splitvfl_top_run(matching_method: str = "exact", fuzzy_thresho
     sends the resulting gradient vector back to each feature party IN
     THE CLEAR. Invoked internally by 'central_train_splitvfl_vanilla',
     not meant to be run standalone.
+
+    NOT an unencrypted mirror of the secure splitVFL circuit - see
+    train_unified.py's central_train docstring: this trains a separate
+    per-party bottom model, while the secure circuit trains one joint
+    hidden layer over every party's concatenated features. Don't
+    compare predictions/accuracy between the two as a correctness check.
     """
     return _run_job("vanilla_train_splitvfl_top_run", matching_method, fuzzy_threshold, run_id)
