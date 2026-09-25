@@ -269,23 +269,25 @@ def central_train(
         # argument the caller supplies (e.g. from a prior 'Run private
         # PSI' call's reported intersection_size) rather than guessed
         # here - omitting it keeps today's proven default shape.
-        # A schema override is needed whenever either the row-count bound
-        # or the algorithm differs from the computing parties' current
-        # default (n_samples=200, algorithm='logistic') - both actually
-        # change the compiled circuit, unlike feature counts which are
-        # always safe to just discover and send.
-        if n_samples is not None or algorithm != "logistic":
-            schema = {
-                "n_samples": n_samples if n_samples is not None else 200,
-                "n_feat_a": n_feat_a, "n_feat_b": n_feat_b, "n_feat_c": n_feat_c,
-                "n_epochs": 200, "algorithm": algorithm,
-            }
-            agg_kwargs["schema"] = schema
-            info(f"Central (train {architecture}, {privacy_mode}): discovered schema {schema}")
-        else:
-            info(f"Central (train {architecture}, {privacy_mode}): discovered feature counts "
-                 f"n_feat_a={n_feat_a}, n_feat_b={n_feat_b}, n_feat_c={n_feat_c} - "
-                 f"n_samples not given, keeping the computing parties' current default row count")
+        # The schema is ALWAYS sent when discovery ran - feature counts
+        # are always safe to auto-discover and forward (each party's CSV
+        # only ever holds its own columns), so they must never be
+        # silently dropped just because the row-count bound wasn't also
+        # overridden. Only n_samples itself falls back to the computing
+        # parties' current default (200) when not explicitly given -
+        # that field alone needs the caller's explicit opt-in, since it
+        # can't be safely auto-computed (see the comment above). Sending
+        # a schema that matches what's already compiled is a no-op for
+        # ensure_circuit_compiled (fingerprint match -> skip recompile),
+        # so this doesn't add any cost for the common case where the
+        # dataset's shape hasn't changed.
+        schema = {
+            "n_samples": n_samples if n_samples is not None else 200,
+            "n_feat_a": n_feat_a, "n_feat_b": n_feat_b, "n_feat_c": n_feat_c,
+            "n_epochs": 200, "algorithm": algorithm,
+        }
+        agg_kwargs["schema"] = schema
+        info(f"Central (train {architecture}, {privacy_mode}): discovered schema {schema}")
 
     # algorithm/n_samples_bound are only valid kwargs for the secure
     # client actions - the non_secure vanilla worker/coordinator
