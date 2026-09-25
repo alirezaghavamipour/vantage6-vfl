@@ -87,23 +87,16 @@ def central_train(
       - 'splitVFL': trainable-module network, label party also
         contributes its own features.
 
-    IMPORTANT - splitVFLc/splitVFL are NOT the same model in both
-    privacy_mode values, unlike aggVFLc/aggVFL: secure mode trains ONE
-    joint Dense+ReLU hidden layer over every party's concatenated
-    features inside the MPC circuit (a single shared weight matrix);
-    non_secure mode instead runs a genuine SplitNN, where each feature
-    party trains its OWN separate bottom Dense+ReLU on only its own
-    columns (independent weight matrices, no shared parameters) and
-    exchanges the resulting embedding/gradient vectors with the label
-    party's top model in the clear each epoch. Different parameter
-    counts, different information flow, different learning dynamics -
-    running the same data through both modes and comparing predictions
-    or accuracy is NOT a valid secure-vs-insecure sanity check for
-    these two architectures (it is for aggVFLc/aggVFL, whose non_secure
-    path is a direct plaintext replica of the same single-layer math
-    the MPC circuit computes). Treat splitVFLc/splitVFL's non_secure
-    mode as its own separate insecure SplitNN baseline, not as an
-    unencrypted mirror of the secure model.
+    For every architecture, non_secure mode is a direct plaintext
+    replica of the same model secure mode trains under MPC - for
+    aggVFLc/aggVFL that's the single fixed-aggregation linear score;
+    for splitVFLc/splitVFL it's the one joint Dense+ReLU hidden layer
+    over every party's concatenated features (each feature party holds
+    its own row-slice of the shared weight matrix and exchanges a
+    linear partial pre-activation - see train_splitvflc_vanilla.py /
+    train_splitvfl_vanilla.py for the exact protocol). So comparing
+    predictions/accuracy between secure and non_secure is a valid
+    sanity check for any architecture.
 
     privacy_mode:
       - 'secure': the real thing - all training happens inside a Rep3
@@ -116,8 +109,9 @@ def central_train(
         label party coordinates directly with each feature party over
         a plain socket; for aggVFLc/aggVFL this reveals a single
         partial score and error value per epoch, for splitVFLc/splitVFL
-        it reveals a full embedding vector and gradient vector per
-        epoch (a stronger, well-documented "feature leakage" signal).
+        it reveals a per-hidden-unit partial pre-activation vector and
+        gradient vector per epoch (a stronger signal than a single
+        score, though still only a linear partial - not raw features).
 
     Row alignment always uses the same private Rep3 PSI circuit
     (dispatched to agg_org_ids), regardless of privacy_mode - only the

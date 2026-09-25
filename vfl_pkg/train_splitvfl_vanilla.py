@@ -55,51 +55,41 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
 
 def vanilla_train_splitvfl_bottom_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
                     run_id: str = None):
-    """NOT PRIVATE - deliberately insecure baseline for comparison
-    against a future real (Rep3 MPC) splitVFL training function.
+    """NOT PRIVATE - deliberately insecure plaintext baseline that is a
+    true unencrypted mirror of the secure splitVFL circuit's model (one
+    joint Dense+ReLU hidden layer over every party's concatenated
+    features, then Dense+Sigmoid).
 
     Feature party: re-aligns local rows (reusing the same Private PSI
-    logic as every other function here), then trains its own small
-    bottom model (Dense -> ReLU) - sends its per-row embedding vector to
-    the label party IN THE CLEAR each epoch, receives a gradient vector
-    IN THE CLEAR back and backpropagates through its own ReLU to update
-    locally. Same protocol as vanilla_train_splitvflc_bottom_run -
-    reuses the identical underlying code, only the dataset/columns
-    differ (splitVFL moves some columns from a feature party to the
-    label party, same split as aggVFL). Invoked internally by
-    'central_train_splitvfl_vanilla', not meant to be run standalone.
-
-    NOT an unencrypted mirror of the secure splitVFL circuit - see
-    train_unified.py's central_train docstring: this trains a separate
-    per-party bottom model, while the secure circuit trains one joint
-    hidden layer over every party's concatenated features. Don't
-    compare predictions/accuracy between the two as a correctness check.
+    logic as every other function here), then holds its own row-slice
+    of the ONE shared Dense1 weight matrix - sends a linear partial
+    pre-activation IN THE CLEAR each epoch, receives the SAME shared
+    gradient matrix back to update its own slice. Same protocol as
+    vanilla_train_splitvflc_bottom_run - reuses the identical
+    underlying code, only the dataset/columns differ (splitVFL moves
+    some columns from a feature party to the label party, same split as
+    aggVFL). Invoked internally by 'central_train_splitvfl_vanilla',
+    not meant to be run standalone.
     """
     return _run_job("vanilla_train_splitvfl_bottom_run", matching_method, fuzzy_threshold, run_id)
 
 
 def vanilla_train_splitvfl_top_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
                     run_id: str = None):
-    """NOT PRIVATE - deliberately insecure baseline for comparison
-    against a future real (Rep3 MPC) splitVFL training function.
+    """NOT PRIVATE - deliberately insecure plaintext baseline that is a
+    true unencrypted mirror of the secure splitVFL circuit's model.
 
     Label party: unlike splitVFLc, this party now also holds its own
     features (not just the label) - it re-aligns local rows (reusing
-    the same Private PSI logic), trains its own bottom model (Dense ->
-    ReLU) on those features (no network round-trip needed for this
-    part, since it already holds both the features and the top model),
-    concatenates its own embedding with both feature parties'
-    embeddings received IN THE CLEAR each epoch, and trains its top
-    model (Dense -> Sigmoid) on the combined 3-way concatenation -
+    the same Private PSI logic), holds its own row-slice of the shared
+    Dense1 weight matrix (computed and updated purely locally, no
+    network round-trip needed since it already holds both this slice
+    and the top model), sums its own partial pre-activation with both
+    feature parties' partials received IN THE CLEAR each epoch, applies
+    the ONE shared ReLU, then runs its Dense+Sigmoid output layer -
     computes the prediction and error using its own real labels, and
-    sends the resulting gradient vector back to each feature party IN
+    sends the SAME shared gradient matrix back to each feature party IN
     THE CLEAR. Invoked internally by 'central_train_splitvfl_vanilla',
     not meant to be run standalone.
-
-    NOT an unencrypted mirror of the secure splitVFL circuit - see
-    train_unified.py's central_train docstring: this trains a separate
-    per-party bottom model, while the secure circuit trains one joint
-    hidden layer over every party's concatenated features. Don't
-    compare predictions/accuracy between the two as a correctness check.
     """
     return _run_job("vanilla_train_splitvfl_top_run", matching_method, fuzzy_threshold, run_id)

@@ -55,46 +55,43 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
 
 def vanilla_train_splitvflc_bottom_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
                     run_id: str = None):
-    """NOT PRIVATE - deliberately insecure baseline for comparison
-    against a future real (Rep3 MPC) splitVFLc training function.
+    """NOT PRIVATE - deliberately insecure plaintext baseline that is a
+    true unencrypted mirror of the secure splitVFLc circuit's model
+    (one joint Dense+ReLU hidden layer over every party's concatenated
+    features, then Dense+Sigmoid).
 
     Feature party: re-aligns local rows (reusing the same Private PSI
-    logic as every other function here), then runs its own small local
-    "bottom model" (one trainable Dense layer + ReLU) - unlike aggVFLc's
-    vanilla worker, which sends a single partial linear score, this
-    sends a per-row EMBEDDING VECTOR to the label party IN THE CLEAR
-    each epoch, and receives a gradient VECTOR (not a single error
-    value) back, which it backpropagates through its own ReLU to update
-    its local weights. This is the standard (insecure) SplitNN design,
-    generally considered a weaker privacy story than aggVFLc's vanilla
-    since embeddings can leak more information than a single score.
-    Invoked internally by 'central_train_splitvflc_vanilla', not meant
-    to be run standalone.
-
-    NOT an unencrypted mirror of the secure splitVFLc circuit: this
-    trains its own separate per-party bottom model, while the secure
-    circuit trains one joint hidden layer over every party's
-    concatenated features - see central_train's docstring
-    (train_unified.py) for the full explanation. Don't compare
-    predictions/accuracy between this and secure splitVFLc as a
-    correctness check.
+    logic as every other function here), then holds its own row-slice
+    of the ONE shared Dense1 weight matrix (not a separate per-party
+    bottom model) - sends the label party a linear partial
+    pre-activation IN THE CLEAR each epoch (no local nonlinearity; the
+    ReLU is shared and lives on the label party, matching where the
+    joint circuit applies it), and receives the SAME shared gradient
+    matrix back to update its own weight slice. See
+    mpc_daemon_client_v2.py's module comment above
+    _vanilla_joint_feature_party_train for why this is mathematically
+    equivalent to the joint circuit's matmul (a joint matrix product is
+    separable into a sum of per-party partial products when each party
+    holds a matching row-slice of the weight matrix). Invoked
+    internally by 'central_train_splitvflc_vanilla', not meant to be
+    run standalone.
     """
     return _run_job("vanilla_train_splitvflc_bottom_run", matching_method, fuzzy_threshold, run_id)
 
 
 def vanilla_train_splitvflc_top_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
                     run_id: str = None):
-    """NOT PRIVATE - deliberately insecure baseline for comparison
-    against a future real (Rep3 MPC) splitVFLc training function.
+    """NOT PRIVATE - deliberately insecure plaintext baseline that is a
+    true unencrypted mirror of the secure splitVFLc circuit's model.
 
     Label party: re-aligns local rows (reusing the same Private PSI
-    logic), then runs its own small "top model" (one trainable Dense
-    layer + Sigmoid) on the concatenation of both feature parties'
-    embeddings, received IN THE CLEAR each epoch - computes the
-    prediction and error using its own real labels, backpropagates
-    through its top layer, and sends the resulting gradient vector back
-    to each feature party IN THE CLEAR so they can backpropagate
-    through their own bottom models. Invoked internally by
-    'central_train_splitvflc_vanilla', not meant to be run standalone.
+    logic), sums both feature parties' partial pre-activations plus its
+    own bias, applies the ONE shared ReLU, then runs its Dense+Sigmoid
+    output layer - computes the prediction and error using its own real
+    labels, and sends the SAME shared gradient matrix back to both
+    feature parties (not a per-party slice, since the nonlinearity and
+    the weight matrix it feeds are shared, not partitioned by party).
+    Invoked internally by 'central_train_splitvflc_vanilla', not meant
+    to be run standalone.
     """
     return _run_job("vanilla_train_splitvflc_top_run", matching_method, fuzzy_threshold, run_id)

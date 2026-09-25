@@ -112,9 +112,8 @@ def train_party_run_splitvflc(matching_method: str = "exact", fuzzy_threshold: i
 
     This circuit is ONE joint Dense+ReLU hidden layer over every
     party's concatenated features (a single shared weight matrix) -
-    NOT the same model as splitVFLc's non_secure baseline, which trains
-    a genuine per-party SplitNN instead. See central_train's docstring
-    (train_unified.py) before comparing accuracy/predictions across
-    privacy_mode for this architecture.
+    splitVFLc's non_secure baseline mirrors this exact model in
+    plaintext (see train_splitvflc_vanilla.py), so accuracy/predictions
+    are directly comparable across privacy_mode for this architecture.
     """
     return _run_job("train_party_run_splitvflc", matching_method, fuzzy_threshold, run_id, schema, max_entities=max_entities)
