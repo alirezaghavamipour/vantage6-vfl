@@ -196,6 +196,15 @@ def central_train(
             "algorithm='linear' is only implemented for privacy_mode='secure' "
             "so far - the non_secure vanilla baseline is still logistic-only"
         )
+    # n_samples ends up embedded directly in generated .mpc circuit
+    # source text on the aggregator (see circuit_generator.py's
+    # _validate_int, which is the actual enforcement point - this check
+    # just fails fast here instead of only after dispatching to every
+    # party). Vantage6 task kwargs are arbitrary JSON from whoever
+    # submits the task, so nothing guarantees this arrived as a plain
+    # int without this check.
+    if n_samples is not None and (isinstance(n_samples, bool) or not isinstance(n_samples, int) or n_samples < 1):
+        raise ValueError(f"n_samples must be a positive int, got {n_samples!r}")
 
     spec = _ARCHITECTURES[architecture][privacy_mode]
     # Ties every job this run dispatches - across every feature, label,
