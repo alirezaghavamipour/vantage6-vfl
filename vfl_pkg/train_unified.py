@@ -108,20 +108,24 @@ def central_train(
     matching_method / fuzzy_threshold: see 'Run private PSI' for the
     full explanation of exact vs. fuzzy entity matching.
 
-    n_samples (secure mode only): the exact number of matched rows the
-    computing parties should compile their training circuit for. Every
-    other structural fact (how many feature columns each party holds)
-    is discovered automatically from the data before training - only
-    the row count needs to be supplied explicitly, because it must
-    equal the TRUE matched intersection size exactly (there is no
-    row-padding yet, so an over- or under-sized circuit will fail to
-    train), and that size can only be known by actually running PSI
-    first. Run 'Run private PSI' (or a prior call to this function) to
-    learn the real intersection_size, then pass it here. Leaving this
-    at its default (None) skips recompiling for a new shape entirely
-    and keeps the computing parties' current default row count (171,
-    today's known-working value) - the safe choice when training on the
-    same dataset as before.
+    n_samples (secure mode only, advanced): the training circuits are
+    compiled for a fixed row-count BOUND, not an exact count - the true
+    matched intersection can be anything up to that bound, handled via
+    row-padding and a mask so padding rows never affect training (the
+    default bound is 200, comfortably above today's known ~171-row
+    intersection, so most training runs never need to touch this
+    argument or trigger a recompile at all). Only set n_samples if your
+    dataset's true intersection could exceed 200: this asks the
+    computing parties to recompile for a larger bound. IMPORTANT: the
+    feature/label parties' own daemons use a SEPARATE, independently
+    deployed copy of the same bound (N_SAMPLES_BOUND in
+    mpc_daemon_client_v2.py) to shape the padded data they send - it
+    does not learn a larger bound from this argument automatically.
+    Raising n_samples here without also updating and redeploying that
+    constant on every feature/label party's host will make training
+    fail with a data-length mismatch. This is a one-time operator-level
+    change (all parties' daemons are deployed by the same operator),
+    not something to set per task.
 
     Predictions are revealed identically to every client party (feature
     and label parties alike), so each one can independently verify the
