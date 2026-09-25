@@ -258,6 +258,33 @@ def central_train(
         }
         schema_results = {org_id: client.wait_for_results(task_id=task_id)[0]
                            for org_id, task_id in schema_tasks.items()}
+        # F04: feature_org_ids[0]/[1] and label_org_id only determine
+        # which vantage6 ORGANIZATIONS receive the job dispatch - which
+        # physical circuit slot (N_FEAT_A vs N_FEAT_B vs label) each one
+        # plays is fixed independently by that host's own PSI_CLIENT_ID
+        # env var, entirely outside this function's control. If a caller
+        # passes org IDs in an order that doesn't match how this
+        # deployment's nodes are actually configured, fp1_org's reported
+        # feature count would silently get labeled n_feat_a and sent to
+        # the aggregator as the expected size of whatever the ACTUAL
+        # client_id=0 party sends - a receive-size mismatch at best,
+        # silently wrong-column training at worst if the two parties'
+        # feature counts happen to coincide. Each report_schema_run
+        # result now includes the reporting party's own client_id (see
+        # report_schema in mpc_daemon_client_v2.py), so this is checked
+        # explicitly instead of silently trusted.
+        expected_client_id = {fp1_org: 0, fp2_org: 1, label_org_id: 2}
+        for org_id, expected in expected_client_id.items():
+            actual = schema_results[org_id].get("client_id")
+            if actual != expected:
+                raise ValueError(
+                    f"org {org_id} was expected to be client_id={expected} "
+                    f"(based on feature_org_ids/label_org_id order) but its "
+                    f"node reports client_id={actual!r} - feature_org_ids "
+                    f"must be [<the org whose node has PSI_CLIENT_ID=0>, "
+                    f"<PSI_CLIENT_ID=1>] and label_org_id must be the org "
+                    f"whose node has PSI_CLIENT_ID=2"
+                )
         n_feat_a = schema_results[fp1_org]["n_features"]
         n_feat_b = schema_results[fp2_org]["n_features"]
         n_feat_c = schema_results[label_org_id]["n_features"] if label_has_features else 0
