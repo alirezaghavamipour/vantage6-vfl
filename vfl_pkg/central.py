@@ -62,6 +62,29 @@ def central(
 
     kwargs = {"matching_method": matching_method, "fuzzy_threshold": fuzzy_threshold, "run_id": run_id}
 
+    # Schema discovery: ask each party its own raw row count (read
+    # straight from its CSV) before dispatching PSI, so the computing
+    # parties can compile a correctly-shaped PSI circuit for this run's
+    # actual data instead of a fixed assumed bound. This is safe to
+    # auto-compute (unlike training's row bound): PSI's own bound only
+    # needs to cover raw candidate counts, which don't require running
+    # PSI first to learn (no chicken-and-egg problem). Rounded up to the
+    # next multiple of 50 with at least 50 rows of headroom, so the
+    # bound never lands exactly on any one party's true count.
+    schema_tasks = {
+        org_id: client.task.create(
+            input_={"method": "report_schema_run", "kwargs": {"run_id": run_id}},
+            organizations=[org_id], name=f"schema-psi-{org_id}",
+        )["id"]
+        for org_id in client_org_ids
+    }
+    schema_results = {org_id: client.wait_for_results(task_id=task_id)[0]
+                       for org_id, task_id in schema_tasks.items()}
+    raw_row_counts = [schema_results[org_id]["n_rows"] for org_id in client_org_ids]
+    max_entities = ((max(raw_row_counts) // 50) + 2) * 50
+    info(f"Central: discovered raw row counts {raw_row_counts}, using PSI bound max_entities={max_entities}")
+    kwargs["max_entities"] = max_entities
+
     tasks = {}
     for org_id in client_org_ids:
         t = client.task.create(

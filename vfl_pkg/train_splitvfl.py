@@ -19,7 +19,8 @@ SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
 
 def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2,
-             run_id: str = None, schema: dict = None) -> dict:
+             run_id: str = None, schema: dict = None, algorithm: str = None,
+             n_samples_bound: int = None, max_entities: int = None) -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -45,6 +46,17 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     # computing party's daemon).
     if schema:
         job["schema"] = schema
+    # algorithm: "logistic" (default) or "linear" - which circuit variant
+    # this feature/label party should encode its data for.
+    if algorithm:
+        job["algorithm"] = algorithm
+    # n_samples_bound: sent directly to this feature/label party (not
+    # just to the computing parties via schema["n_samples"]), since it
+    # independently needs to know how many padding rows to add.
+    if n_samples_bound:
+        job["n_samples_bound"] = n_samples_bound
+    if max_entities:
+        job["max_entities"] = max_entities
     os.makedirs(JOBS_DIR, exist_ok=True)
     with open(os.path.join(JOBS_DIR, job_id + ".json"), "w") as f:
         json.dump(job, f)
@@ -64,7 +76,8 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
 
 
 def train_client_run_splitvfl(matching_method: str = "exact", fuzzy_threshold: int = 2,
-                    run_id: str = None):
+                    run_id: str = None, algorithm: str = None, n_samples_bound: int = None,
+                    max_entities: int = None):
     """Feature/label party: align rows and share this party's own
     columns into the splitVFL training computation (Rep3 MPC -
     private).
@@ -77,12 +90,15 @@ def train_client_run_splitvfl(matching_method: str = "exact", fuzzy_threshold: i
     single fixed logistic regression layer. Internally reuses the same
     Private PSI logic as every other function here to independently
     re-derive the aligned row set.
+
+    algorithm/n_samples_bound/max_entities: see train_client_run (train.py).
     """
-    return _run_job("train_client_run_splitvfl", matching_method, fuzzy_threshold, run_id)
+    return _run_job("train_client_run_splitvfl", matching_method, fuzzy_threshold, run_id,
+                     algorithm=algorithm, n_samples_bound=n_samples_bound, max_entities=max_entities)
 
 
 def train_party_run_splitvfl(matching_method: str = "exact", fuzzy_threshold: int = 2,
-                    run_id: str = None, schema: dict = None):
+                    run_id: str = None, schema: dict = None, max_entities: int = None):
     """Computing party: run this party's role in the Rep3 splitVFL
     training computation (trainable-module vertical FL; the label
     party contributes features too, same as aggVFL). This computing
@@ -90,6 +106,7 @@ def train_party_run_splitvfl(matching_method: str = "exact", fuzzy_threshold: in
     secret share of the computation.
 
     schema: this run's discovered circuit shape - None uses the
-    known-working default shape.
+    known-working default shape. max_entities: PSI's own row-count
+    bound - None uses this daemon's own local default.
     """
-    return _run_job("train_party_run_splitvfl", matching_method, fuzzy_threshold, run_id, schema)
+    return _run_job("train_party_run_splitvfl", matching_method, fuzzy_threshold, run_id, schema, max_entities=max_entities)

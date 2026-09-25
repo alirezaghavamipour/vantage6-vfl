@@ -23,7 +23,7 @@ SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
 
 def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2,
-             run_id: str = None) -> dict:
+             run_id: str = None, max_entities: int = None) -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -43,6 +43,13 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     # invocation outside an orchestrator.
     if run_id:
         job["run_id"] = run_id
+    # max_entities: public upper bound on any single party's raw
+    # candidate row count (before matching) this run's PSI circuit
+    # should be compiled for - None uses the computing party's own
+    # default (320). Auto-computed by central()/central_train() from
+    # schema discovery's reported row counts, not usually set by hand.
+    if max_entities:
+        job["max_entities"] = max_entities
     timeout = TIMEOUT_BY_METHOD.get(matching_method, 120)
     os.makedirs(JOBS_DIR, exist_ok=True)
     with open(os.path.join(JOBS_DIR, job_id + ".json"), "w") as f:
@@ -63,7 +70,7 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
 
 
 def psi_client_share(matching_method: str = "exact", fuzzy_threshold: int = 2,
-                      run_id: str = None):
+                      run_id: str = None, max_entities: int = None):
     """Feature/label party: share local entity data into the MPC computation.
 
     matching_method: "exact" (hash-based exact match) or "fuzzy"
@@ -74,15 +81,18 @@ def psi_client_share(matching_method: str = "exact", fuzzy_threshold: int = 2,
     run_id: shared identifier set by central() to correlate this job with
     the other jobs dispatched by the same orchestrated run, across every
     host they land on. Not meant to be set when calling this directly.
+    max_entities: this run's row-count bound, if central()'s schema
+    discovery raised it above the default - None uses this daemon's own
+    local default (320).
     """
-    return _run_job("psi_client_run", matching_method, fuzzy_threshold, run_id)
+    return _run_job("psi_client_run", matching_method, fuzzy_threshold, run_id, max_entities)
 
 
 def psi_party_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
-                   run_id: str = None):
+                   run_id: str = None, max_entities: int = None):
     """Computing party: run this party's role in the Rep3 PSI computation.
 
     run_id: see psi_client_share - shared identifier set by central() for
-    cross-host job correlation.
+    cross-host job correlation. max_entities: see psi_client_share.
     """
-    return _run_job("psi_party_run", matching_method, fuzzy_threshold, run_id)
+    return _run_job("psi_party_run", matching_method, fuzzy_threshold, run_id, max_entities)

@@ -22,7 +22,8 @@ SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
 
 def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2,
-             run_id: str = None, schema: dict = None) -> dict:
+             run_id: str = None, schema: dict = None, algorithm: str = None,
+             n_samples_bound: int = None, max_entities: int = None) -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -48,6 +49,23 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     # known-working 171-row/13-feature/200-epoch shape.
     if schema:
         job["schema"] = schema
+    # algorithm: "logistic" (default) or "linear" - which circuit variant
+    # this feature/label party should encode its data for.
+    if algorithm:
+        job["algorithm"] = algorithm
+    # n_samples_bound: the SAME row-count bound sent to the computing
+    # parties via schema["n_samples"] above, but sent directly to this
+    # feature/label party too, since it independently needs to know how
+    # many padding rows to add - without this, raising schema["n_samples"]
+    # for the computing parties alone would leave this party still padding
+    # to its own old default, causing a data-length mismatch.
+    if n_samples_bound:
+        job["n_samples_bound"] = n_samples_bound
+    # max_entities: PSI's own row-count bound (raw candidate rows before
+    # matching, separate from n_samples_bound which bounds the matched
+    # intersection) - see vfl_pkg/psi.py's psi_client_share.
+    if max_entities:
+        job["max_entities"] = max_entities
     os.makedirs(JOBS_DIR, exist_ok=True)
     with open(os.path.join(JOBS_DIR, job_id + ".json"), "w") as f:
         json.dump(job, f)
@@ -67,7 +85,8 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
 
 
 def train_client_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
-                      run_id: str = None):
+                      run_id: str = None, algorithm: str = None, n_samples_bound: int = None,
+                      max_entities: int = None):
     """Feature/label party: align rows and share this party's own columns
     into the aggVFLc training computation.
 
@@ -84,12 +103,17 @@ def train_client_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
     used when matching_method="fuzzy".
     run_id: shared identifier set by central_train to correlate this job
     with the other jobs dispatched by the same orchestrated run.
+    algorithm: "logistic" (default) or "linear" - see central_train.
+    n_samples_bound: this run's row-count bound, if central_train's
+    schema discovery raised it above the default - None uses this
+    daemon's own local default.
     """
-    return _run_job("train_client_run", matching_method, fuzzy_threshold, run_id)
+    return _run_job("train_client_run", matching_method, fuzzy_threshold, run_id,
+                     algorithm=algorithm, n_samples_bound=n_samples_bound, max_entities=max_entities)
 
 
 def train_party_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
-                     run_id: str = None, schema: dict = None):
+                     run_id: str = None, schema: dict = None, max_entities: int = None):
     """Computing party: run this party's role in the Rep3 aggVFLc
     training computation (fixed-aggregation vertical logistic
     regression; the label party contributes no features of its own).
@@ -98,6 +122,7 @@ def train_party_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
 
     run_id: see train_client_run. schema: this run's discovered circuit
     shape (see central_train's schema-discovery step) - None uses the
-    known-working default shape.
+    known-working default shape. max_entities: PSI's own row-count
+    bound - None uses this daemon's own local default.
     """
-    return _run_job("train_party_run", matching_method, fuzzy_threshold, run_id, schema)
+    return _run_job("train_party_run", matching_method, fuzzy_threshold, run_id, schema, max_entities=max_entities)

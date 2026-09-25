@@ -115,18 +115,21 @@ def central_train(
     row-padding and a mask so padding rows never affect training (the
     default bound is 200, comfortably above today's known ~171-row
     intersection, so most training runs never need to touch this
-    argument or trigger a recompile at all). Only set n_samples if your
-    dataset's true intersection could exceed 200: this asks the
-    computing parties to recompile for a larger bound. IMPORTANT: the
-    feature/label parties' own daemons use a SEPARATE, independently
-    deployed copy of the same bound (N_SAMPLES_BOUND in
-    mpc_daemon_client_v2.py) to shape the padded data they send - it
-    does not learn a larger bound from this argument automatically.
-    Raising n_samples here without also updating and redeploying that
-    constant on every feature/label party's host will make training
-    fail with a data-length mismatch. This is a one-time operator-level
-    change (all parties' daemons are deployed by the same operator),
-    not something to set per task.
+    argument or trigger a recompile at all). Set n_samples if your
+    dataset's true intersection could exceed 200: this run's shared bound
+    is sent to every party that needs it - the computing parties (who
+    recompile their circuit for it) and every feature/label party (who
+    use it to correctly shape their padded data) - from this one
+    argument, no separate manual redeployment required.
+
+    Note: PSI has its own, separate row-count bound (a public upper
+    bound on any party's RAW candidate row count before matching, as
+    opposed to n_samples above which bounds the MATCHED intersection).
+    Unlike n_samples, PSI's bound is fully automatic - there is no
+    argument for it here, because it's always safely computable from
+    each party's real row count (discovered the same way as the
+    feature counts below) without needing PSI to run first the way the
+    matched count does.
 
     algorithm (secure mode only):
       - 'logistic' (default): binary classification - the label must be
@@ -238,6 +241,22 @@ def central_train(
         n_feat_a = schema_results[fp1_org]["n_features"]
         n_feat_b = schema_results[fp2_org]["n_features"]
         n_feat_c = schema_results[label_org_id]["n_features"] if label_has_features else 0
+        # PSI's own row-count bound (a public upper bound on any single
+        # party's RAW candidate row count, before matching - separate
+        # from n_samples above, which bounds the MATCHED intersection
+        # and can't be safely auto-computed the same way). This one CAN
+        # be safely auto-computed: raw row counts are already known from
+        # the schema discovery just above, with no chicken-and-egg
+        # problem (unlike the matched count, raw counts don't need PSI
+        # to run first). Rounded up to the next multiple of 50 with at
+        # least 50 rows of headroom, so the bound never lands exactly on
+        # any one party's true count.
+        raw_row_counts = [schema_results[fp1_org]["n_rows"], schema_results[fp2_org]["n_rows"],
+                           schema_results[label_org_id]["n_rows"]]
+        max_entities = ((max(raw_row_counts) // 50) + 2) * 50
+        agg_kwargs["max_entities"] = max_entities
+        info(f"Central (train {architecture}, {privacy_mode}): discovered raw row counts "
+             f"{raw_row_counts}, using PSI bound max_entities={max_entities}")
         # Feature counts are safe to auto-discover: each party's CSV
         # physically holds only its own columns, so "how many" is a
         # stable fact about the data regardless of which rows end up
@@ -268,11 +287,23 @@ def central_train(
                  f"n_feat_a={n_feat_a}, n_feat_b={n_feat_b}, n_feat_c={n_feat_c} - "
                  f"n_samples not given, keeping the computing parties' current default row count")
 
-    # algorithm is only a valid kwarg for the secure client actions - the
-    # non_secure vanilla worker/coordinator functions don't accept it
-    # (validated above: algorithm='linear' is already rejected together
-    # with privacy_mode='non_secure').
-    client_kwargs = dict(kwargs, algorithm=algorithm) if privacy_mode == "secure" else kwargs
+    # algorithm/n_samples_bound are only valid kwargs for the secure
+    # client actions - the non_secure vanilla worker/coordinator
+    # functions don't accept them (algorithm='linear' is already
+    # rejected together with privacy_mode='non_secure' above).
+    # n_samples_bound is sent to the feature/label parties directly
+    # (not just to the computing parties via agg_kwargs["schema"]),
+    # since each of them independently needs to know how many padding
+    # rows to add - without this, raising the bound for the computing
+    # parties alone would leave every feature/label party still padding
+    # to their own unchanged local default, causing a data-length
+    # mismatch (the exact bug the schema-only version of this had).
+    if privacy_mode == "secure":
+        client_kwargs = dict(kwargs, algorithm=algorithm, max_entities=max_entities)
+        if n_samples is not None:
+            client_kwargs["n_samples_bound"] = n_samples
+    else:
+        client_kwargs = kwargs
 
     tasks = {}
     if privacy_mode == "secure":
