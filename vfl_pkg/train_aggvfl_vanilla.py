@@ -1,9 +1,9 @@
-import json
 import os
-import time
 import uuid
 
 from vantage6.algorithm.tools.util import info
+
+from ._bridge_io import publish_job, wait_for_result
 
 BRIDGE = "/mnt/mpcbridge"
 JOBS_DIR = os.path.join(BRIDGE, "jobs")
@@ -15,7 +15,7 @@ SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
 
 def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2,
-             run_id: str = None) -> dict:
+             run_id: str = None, database_by_client_id: dict = None, max_entities: int = None) -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -35,26 +35,26 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     # outside an orchestrator.
     if run_id:
         job["run_id"] = run_id
-    os.makedirs(JOBS_DIR, exist_ok=True)
-    with open(os.path.join(JOBS_DIR, job_id + ".json"), "w") as f:
-        json.dump(job, f)
+    # database_by_client_id: R06 fix - each client's own database
+    # selection, keyed by CLIENT_ID, so PSI and training on this party
+    # read the exact same file. Rows never travel through this job dict -
+    # only the resolved database LABEL (a string).
+    if database_by_client_id:
+        job["database_by_client_id"] = database_by_client_id
+    # max_entities: R11 fix - see train_vanilla.py's matching comment.
+    if max_entities:
+        job["max_entities"] = max_entities
+    publish_job(JOBS_DIR, job)
     info(f"Vanilla aggVFL train: submitted job {job_id} ({action}, method={matching_method}, "
          f"fuzzy_threshold={fuzzy_threshold}), waiting for host daemon...")
 
-    result_path = os.path.join(RESULTS_DIR, job_id + ".json")
-    for _ in range(VANILLA_TIMEOUT):
-        if os.path.exists(result_path):
-            with open(result_path) as f:
-                result = json.load(f)
-            os.remove(result_path)
-            info(f"Vanilla aggVFL train: job {job_id} completed with status {result.get('status')}")
-            return result
-        time.sleep(1)
-    raise TimeoutError(f"Vanilla aggVFL train: host daemon did not respond to job {job_id} within {VANILLA_TIMEOUT}s")
+    result = wait_for_result(RESULTS_DIR, job_id, VANILLA_TIMEOUT, label="Vanilla aggVFL train")
+    info(f"Vanilla aggVFL train: job {job_id} completed with status {result.get('status')}")
+    return result
 
 
 def vanilla_train_aggvfl_worker_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
-                    run_id: str = None):
+                    run_id: str = None, database_by_client_id: dict = None, max_entities: int = None):
     """NOT PRIVATE - deliberately insecure baseline for comparison
     against a future real (Rep3 MPC) aggVFL training function.
 
@@ -68,11 +68,12 @@ def vanilla_train_aggvfl_worker_run(matching_method: str = "exact", fuzzy_thresh
     some columns from FP2 to the label party. Invoked internally by
     'central_train_aggvfl_vanilla', not meant to be run standalone.
     """
-    return _run_job("vanilla_train_aggvfl_worker_run", matching_method, fuzzy_threshold, run_id)
+    return _run_job("vanilla_train_aggvfl_worker_run", matching_method, fuzzy_threshold, run_id,
+                     database_by_client_id=database_by_client_id, max_entities=max_entities)
 
 
 def vanilla_train_aggvfl_coordinator_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
-                    run_id: str = None):
+                    run_id: str = None, database_by_client_id: dict = None, max_entities: int = None):
     """NOT PRIVATE - deliberately insecure baseline for comparison
     against a future real (Rep3 MPC) aggVFL training function.
 
@@ -85,4 +86,5 @@ def vanilla_train_aggvfl_coordinator_run(matching_method: str = "exact", fuzzy_t
     every feature party IN THE CLEAR. Invoked internally by
     'central_train_aggvfl_vanilla', not meant to be run standalone.
     """
-    return _run_job("vanilla_train_aggvfl_coordinator_run", matching_method, fuzzy_threshold, run_id)
+    return _run_job("vanilla_train_aggvfl_coordinator_run", matching_method, fuzzy_threshold, run_id,
+                     database_by_client_id=database_by_client_id, max_entities=max_entities)

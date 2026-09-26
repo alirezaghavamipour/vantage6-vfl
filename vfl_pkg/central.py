@@ -130,32 +130,71 @@ def central(
     # underlying set, we cross-check that they agree as extra evidence of
     # correctness (Rep3's guarantee assumes at most 1 of the 3 computing
     # parties is dishonest).
-    intersection_size = None
-    client_answers = {}
-    for org_id in client_org_ids:
+    #
+    # R05 fix: agreement is only ever computed and reported over parties
+    # that actually completed - a prior version silently dropped failed/
+    # missing parties from BOTH the agreement check and the party count,
+    # so e.g. 1 success + 2 failures could still report
+    # clients_agree=True (trivially, comparing one value to itself). Now:
+    # clients_ok/aggregators_ok require EVERY expected party to have
+    # completed, and clients_agree is only ever True when clients_ok is
+    # also True - "agree" now means "everyone finished AND everyone's
+    # answer matched," never "the survivors happened to match."
+    client_statuses = {org_id: (results.get(org_id) or {}).get("status") for org_id in client_org_ids}
+    agg_statuses = {org_id: (results.get(org_id) or {}).get("status") for org_id in agg_org_ids}
+    clients_ok = all(s == "complete" for s in client_statuses.values())
+    aggregators_ok = all(s == "complete" for s in agg_statuses.values())
+
+    client_answers = {
+        org_id: results[org_id].get("intersection_size")
+        for org_id in client_org_ids
+        if client_statuses[org_id] == "complete"
+    }
+    intersection_size = next(iter(client_answers.values()), None)
+    clients_agree = clients_ok and len(set(client_answers.values())) == 1
+
+    overall_status = "success" if (clients_ok and aggregators_ok and clients_agree) else "incomplete"
+
+    # Sanitized per-party errors: status + message only (never raw
+    # stderr, which could in principle contain data this summary isn't
+    # meant to expose) - available for every party that did NOT
+    # complete, regardless of debug, since "which party failed and why"
+    # is operational information the submitter needs to act on, not
+    # sensitive row-level data.
+    party_errors = {}
+    for org_id in list(client_org_ids) + list(agg_org_ids):
         r = results.get(org_id)
-        if r and r.get("status") == "complete":
-            client_answers[org_id] = r.get("intersection_size")
-            if intersection_size is None:
-                intersection_size = r.get("intersection_size")
+        status = (r or {}).get("status")
+        if status != "complete":
+            party_errors[org_id] = {
+                "status": status,
+                "message": (r or {}).get("message", "no result received"),
+            }
 
-    clients_agree = len(set(client_answers.values())) <= 1 if client_answers else None
-
-    info(f"Central: PSI complete - intersection_size={intersection_size} (clients_agree={clients_agree})")
+    info(f"Central: PSI {overall_status} - intersection_size={intersection_size}, "
+         f"clients_agree={clients_agree}, clients_ok={clients_ok}, aggregators_ok={aggregators_ok}"
+         + (f", errors={party_errors}" if party_errors else ""))
 
     output = {
         "summary": [
             {"metric": "run_id", "value": run_id},
+            {"metric": "overall_status", "value": overall_status},
             {"metric": "matching_method", "value": matching_method},
             {"metric": "fuzzy_threshold", "value": fuzzy_threshold if matching_method == "fuzzy" else None},
             {"metric": "intersection_size", "value": intersection_size},
             {"metric": "clients_agree", "value": clients_agree},
+            {"metric": "clients_ok", "value": clients_ok},
+            {"metric": "aggregators_ok", "value": aggregators_ok},
         ],
         "run_id": run_id,
+        "overall_status": overall_status,
         "matching_method": matching_method,
         "fuzzy_threshold": fuzzy_threshold if matching_method == "fuzzy" else None,
         "intersection_size": intersection_size,
         "clients_agree": clients_agree,
+        "clients_ok": clients_ok,
+        "aggregators_ok": aggregators_ok,
+        "party_errors": party_errors,
     }
 
     if debug:

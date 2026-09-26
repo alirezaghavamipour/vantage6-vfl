@@ -1,9 +1,9 @@
-import json
 import os
-import time
 import uuid
 
 from vantage6.algorithm.tools.util import info
+
+from ._bridge_io import publish_job, wait_for_result
 
 BRIDGE = "/mnt/mpcbridge"
 JOBS_DIR = os.path.join(BRIDGE, "jobs")
@@ -19,7 +19,8 @@ SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
 def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2,
              run_id: str = None, schema: dict = None, algorithm: str = None,
-             n_samples_bound: int = None, max_entities: int = None, debug: bool = False) -> dict:
+             n_samples_bound: int = None, max_entities: int = None, debug: bool = False,
+             database_by_client_id: dict = None, expected_n_features_by_client_id: dict = None) -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -58,27 +59,23 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
         job["max_entities"] = max_entities
     if debug:
         job["debug"] = True
-    os.makedirs(JOBS_DIR, exist_ok=True)
-    with open(os.path.join(JOBS_DIR, job_id + ".json"), "w") as f:
-        json.dump(job, f)
+    if database_by_client_id:
+        job["database_by_client_id"] = database_by_client_id
+    if expected_n_features_by_client_id:
+        job["expected_n_features_by_client_id"] = expected_n_features_by_client_id
+    publish_job(JOBS_DIR, job)
     info(f"Train (aggVFL): submitted job {job_id} ({action}, method={matching_method}, "
          f"fuzzy_threshold={fuzzy_threshold}), waiting for host daemon...")
 
-    result_path = os.path.join(RESULTS_DIR, job_id + ".json")
-    for _ in range(TRAIN_TIMEOUT):
-        if os.path.exists(result_path):
-            with open(result_path) as f:
-                result = json.load(f)
-            os.remove(result_path)
-            info(f"Train (aggVFL): job {job_id} completed with status {result.get('status')}")
-            return result
-        time.sleep(1)
-    raise TimeoutError(f"Train (aggVFL): host daemon did not respond to job {job_id} within {TRAIN_TIMEOUT}s")
+    result = wait_for_result(RESULTS_DIR, job_id, TRAIN_TIMEOUT, label="Train (aggVFL)")
+    info(f"Train (aggVFL): job {job_id} completed with status {result.get('status')}")
+    return result
 
 
 def train_client_run_aggvfl(matching_method: str = "exact", fuzzy_threshold: int = 2,
                     run_id: str = None, algorithm: str = None, n_samples_bound: int = None,
-                    max_entities: int = None, debug: bool = False):
+                    max_entities: int = None, debug: bool = False,
+                    database_by_client_id: dict = None, expected_n_features_by_client_id: dict = None):
     """Feature/label party: align rows and share this party's own
     columns into the aggVFL training computation (Rep3 MPC - private).
 
@@ -91,7 +88,8 @@ def train_client_run_aggvfl(matching_method: str = "exact", fuzzy_threshold: int
     """
     return _run_job("train_client_run_aggvfl", matching_method, fuzzy_threshold, run_id,
                      algorithm=algorithm, n_samples_bound=n_samples_bound, max_entities=max_entities,
-                     debug=debug)
+                     debug=debug, database_by_client_id=database_by_client_id,
+                     expected_n_features_by_client_id=expected_n_features_by_client_id)
 
 
 def train_party_run_aggvfl(matching_method: str = "exact", fuzzy_threshold: int = 2,

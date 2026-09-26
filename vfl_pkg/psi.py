@@ -1,9 +1,9 @@
-import json
 import os
-import time
 import uuid
 
 from vantage6.algorithm.tools.util import info
+
+from ._bridge_io import publish_job, wait_for_result
 
 BRIDGE = "/mnt/mpcbridge"
 JOBS_DIR = os.path.join(BRIDGE, "jobs")
@@ -57,22 +57,13 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     if max_entities:
         job["max_entities"] = max_entities
     timeout = TIMEOUT_BY_METHOD.get(matching_method, 120)
-    os.makedirs(JOBS_DIR, exist_ok=True)
-    with open(os.path.join(JOBS_DIR, job_id + ".json"), "w") as f:
-        json.dump(job, f)
+    publish_job(JOBS_DIR, job)
     info(f"PSI: submitted job {job_id} (run_id={run_id}, {action}, method={matching_method}, "
          f"fuzzy_threshold={fuzzy_threshold}), waiting for host daemon...")
 
-    result_path = os.path.join(RESULTS_DIR, job_id + ".json")
-    for _ in range(timeout):
-        if os.path.exists(result_path):
-            with open(result_path) as f:
-                result = json.load(f)
-            os.remove(result_path)
-            info(f"PSI: job {job_id} completed with status {result.get('status')}")
-            return result
-        time.sleep(1)
-    raise TimeoutError(f"PSI: host daemon did not respond to job {job_id} within {timeout}s")
+    result = wait_for_result(RESULTS_DIR, job_id, timeout, label="PSI")
+    info(f"PSI: job {job_id} completed with status {result.get('status')}")
+    return result
 
 
 def psi_client_share(matching_method: str = "exact", fuzzy_threshold: int = 2,

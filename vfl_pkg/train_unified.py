@@ -218,92 +218,131 @@ def central_train(
     client_org_ids = list(feature_org_ids) + [label_org_id]
     label_has_features = architecture in ("aggVFL", "splitVFL")
 
+    # R06 fix: ONE selection, reused for schema discovery AND for the
+    # actual PSI+training dispatch below (both secure and non_secure) -
+    # previously PSI always read "heart_vfl" while aggVFL/splitVFL
+    # training separately, independently read "heart_vfl_aggvfl" for
+    # FP2/LP, with nothing tying the two together - if the datasets
+    # ever diverged, PSI could select a name missing from the training
+    # file, or silently miss valid training rows present only there.
+    # Keyed by CLIENT_ID (each daemon already self-selects its own role
+    # this way, from its own PSI_CLIENT_ID env var - see F04's note
+    # below) rather than by org_id, since client_kwargs is sent
+    # identically to every client org and each daemon picks out its own
+    # entry. The label party's own dataset only carries real feature
+    # columns in the "heart_vfl_aggvfl" database (aggVFL/splitVFL); the
+    # plain "heart_vfl" database gives it target+full_name only, which
+    # report_schema correctly reports as 0 features.
+    database_by_client_id = {
+        0: "heart_vfl",
+        1: "heart_vfl_aggvfl" if label_has_features else "heart_vfl",
+        2: "heart_vfl_aggvfl" if label_has_features else "heart_vfl",
+    }
+
     info(f"Central (train {architecture}, {privacy_mode}): starting training run "
          f"(run_id={run_id}, method={matching_method}, fuzzy_threshold={fuzzy_threshold}) - "
          f"features={feature_org_ids}, label={label_org_id}, aggregators={agg_org_ids}")
 
     # Schema discovery: before dispatching training, ask each party to
     # report its own row count and feature-column count (read straight
-    # from its CSV) - lets the aggregators learn this run's actual
-    # circuit shape instead of assuming today's fixed 171-row/13-feature
-    # dataset, and recompile their training circuit only when the shape
-    # actually differs from what's already compiled (see
-    # ensure_circuit_compiled on the aggregator daemon). Only meaningful
-    # for the secure/MPC path - the non_secure vanilla path already
-    # discovers its own columns locally at training time and has no
-    # circuit to recompile.
+    # from its CSV).
+    #
+    # R11 fix: the ROW-COUNT half of this (and the party-role validation
+    # it enables) now runs for BOTH privacy modes, not secure only - PSI
+    # itself is the SAME private Rep3 circuit regardless of which
+    # training math (secure or vanilla) consumes its output, so its own
+    # row-count bound (max_entities) needs discovering identically either
+    # way. Previously non_secure runs never got this at all: max_entities
+    # was left unset in that branch, so vanilla training's PSI step
+    # silently fell back to each daemon's own local default bound
+    # (MAX_ENTITIES=320) no matter how large the real dataset was - a
+    # raw dataset above that default would silently truncate PSI's own
+    # candidate set with no error, before matching even ran.
+    #
+    # The FEATURE-COUNT half (n_feat_a/b/c, expected_n_features_by_client_id,
+    # and the schema dict used to size/recompile the secure training
+    # circuit) stays secure-only below - non_secure has no compiled
+    # circuit to size and discovers its own columns locally at training
+    # time.
     agg_kwargs = dict(kwargs)
-    if privacy_mode == "secure":
-        fp1_org, fp2_org = feature_org_ids[0], feature_org_ids[1]
-        # The label party's own dataset only carries real feature columns
-        # in the "heart_vfl_aggvfl" database (aggVFL/splitVFL); the plain
-        # "heart_vfl" database gives it target+full_name only, which
-        # report_schema correctly reports as 0 features.
-        fp2_database = "heart_vfl_aggvfl" if label_has_features else "heart_vfl"
-        lp_database = "heart_vfl_aggvfl" if label_has_features else "heart_vfl"
+    fp1_org, fp2_org = feature_org_ids[0], feature_org_ids[1]
 
-        schema_tasks = {
-            fp1_org: client.task.create(
-                input_={"method": "report_schema_run", "kwargs": {"database": "heart_vfl", "run_id": run_id}},
-                organizations=[fp1_org], name=f"schema-{architecture}-{fp1_org}",
-            )["id"],
-            fp2_org: client.task.create(
-                input_={"method": "report_schema_run", "kwargs": {"database": fp2_database, "run_id": run_id}},
-                organizations=[fp2_org], name=f"schema-{architecture}-{fp2_org}",
-            )["id"],
-            label_org_id: client.task.create(
-                input_={"method": "report_schema_run", "kwargs": {"database": lp_database, "run_id": run_id}},
-                organizations=[label_org_id], name=f"schema-{architecture}-{label_org_id}",
-            )["id"],
-        }
-        schema_results = {org_id: client.wait_for_results(task_id=task_id)[0]
-                           for org_id, task_id in schema_tasks.items()}
-        # F04: feature_org_ids[0]/[1] and label_org_id only determine
-        # which vantage6 ORGANIZATIONS receive the job dispatch - which
-        # physical circuit slot (N_FEAT_A vs N_FEAT_B vs label) each one
-        # plays is fixed independently by that host's own PSI_CLIENT_ID
-        # env var, entirely outside this function's control. If a caller
-        # passes org IDs in an order that doesn't match how this
-        # deployment's nodes are actually configured, fp1_org's reported
-        # feature count would silently get labeled n_feat_a and sent to
-        # the aggregator as the expected size of whatever the ACTUAL
-        # client_id=0 party sends - a receive-size mismatch at best,
-        # silently wrong-column training at worst if the two parties'
-        # feature counts happen to coincide. Each report_schema_run
-        # result now includes the reporting party's own client_id (see
-        # report_schema in mpc_daemon_client_v2.py), so this is checked
-        # explicitly instead of silently trusted.
-        expected_client_id = {fp1_org: 0, fp2_org: 1, label_org_id: 2}
-        for org_id, expected in expected_client_id.items():
-            actual = schema_results[org_id].get("client_id")
-            if actual != expected:
-                raise ValueError(
-                    f"org {org_id} was expected to be client_id={expected} "
-                    f"(based on feature_org_ids/label_org_id order) but its "
-                    f"node reports client_id={actual!r} - feature_org_ids "
-                    f"must be [<the org whose node has PSI_CLIENT_ID=0>, "
-                    f"<PSI_CLIENT_ID=1>] and label_org_id must be the org "
-                    f"whose node has PSI_CLIENT_ID=2"
-                )
+    schema_tasks = {
+        fp1_org: client.task.create(
+            input_={"method": "report_schema_run", "kwargs": {"database": database_by_client_id[0], "run_id": run_id}},
+            organizations=[fp1_org], name=f"schema-{architecture}-{fp1_org}",
+        )["id"],
+        fp2_org: client.task.create(
+            input_={"method": "report_schema_run", "kwargs": {"database": database_by_client_id[1], "run_id": run_id}},
+            organizations=[fp2_org], name=f"schema-{architecture}-{fp2_org}",
+        )["id"],
+        label_org_id: client.task.create(
+            input_={"method": "report_schema_run", "kwargs": {"database": database_by_client_id[2], "run_id": run_id}},
+            organizations=[label_org_id], name=f"schema-{architecture}-{label_org_id}",
+        )["id"],
+    }
+    schema_results = {org_id: client.wait_for_results(task_id=task_id)[0]
+                       for org_id, task_id in schema_tasks.items()}
+    # F04 / R11: feature_org_ids[0]/[1] and label_org_id only determine
+    # which vantage6 ORGANIZATIONS receive the job dispatch - which
+    # physical circuit slot (N_FEAT_A vs N_FEAT_B vs label) each one
+    # plays is fixed independently by that host's own PSI_CLIENT_ID env
+    # var, entirely outside this function's control. If a caller passes
+    # org IDs in an order that doesn't match how this deployment's nodes
+    # are actually configured, fp1_org's reported feature count would
+    # silently get labeled n_feat_a and sent to the aggregator as the
+    # expected size of whatever the ACTUAL client_id=0 party sends - a
+    # receive-size mismatch at best, silently wrong-column training at
+    # worst if the two parties' feature counts happen to coincide. This
+    # validation matters identically for non_secure: database selection
+    # (database_by_client_id) and feature ownership (which columns a
+    # party's dataset holds) both depend on the SAME role assignment,
+    # whichever privacy_mode is training. Each report_schema_run result
+    # includes the reporting party's own client_id (see report_schema in
+    # mpc_daemon_client_v2.py), so this is checked explicitly instead of
+    # silently trusted.
+    expected_client_id = {fp1_org: 0, fp2_org: 1, label_org_id: 2}
+    for org_id, expected in expected_client_id.items():
+        actual = schema_results[org_id].get("client_id")
+        if actual != expected:
+            raise ValueError(
+                f"org {org_id} was expected to be client_id={expected} "
+                f"(based on feature_org_ids/label_org_id order) but its "
+                f"node reports client_id={actual!r} - feature_org_ids "
+                f"must be [<the org whose node has PSI_CLIENT_ID=0>, "
+                f"<PSI_CLIENT_ID=1>] and label_org_id must be the org "
+                f"whose node has PSI_CLIENT_ID=2"
+            )
+    # PSI's own row-count bound (a public upper bound on any single
+    # party's RAW candidate row count, before matching - separate from
+    # n_samples below, which bounds the MATCHED intersection and can't be
+    # safely auto-computed the same way). This one CAN be safely
+    # auto-computed: raw row counts are already known from the schema
+    # discovery just above, with no chicken-and-egg problem (unlike the
+    # matched count, raw counts don't need PSI to run first). Rounded up
+    # to the next multiple of 50 with at least 50 rows of headroom, so
+    # the bound never lands exactly on any one party's true count.
+    raw_row_counts = [schema_results[fp1_org]["n_rows"], schema_results[fp2_org]["n_rows"],
+                       schema_results[label_org_id]["n_rows"]]
+    max_entities = ((max(raw_row_counts) // 50) + 2) * 50
+    agg_kwargs["max_entities"] = max_entities
+    info(f"Central (train {architecture}, {privacy_mode}): discovered raw row counts "
+         f"{raw_row_counts}, using PSI bound max_entities={max_entities}")
+
+    if privacy_mode == "secure":
         n_feat_a = schema_results[fp1_org]["n_features"]
         n_feat_b = schema_results[fp2_org]["n_features"]
         n_feat_c = schema_results[label_org_id]["n_features"] if label_has_features else 0
-        # PSI's own row-count bound (a public upper bound on any single
-        # party's RAW candidate row count, before matching - separate
-        # from n_samples above, which bounds the MATCHED intersection
-        # and can't be safely auto-computed the same way). This one CAN
-        # be safely auto-computed: raw row counts are already known from
-        # the schema discovery just above, with no chicken-and-egg
-        # problem (unlike the matched count, raw counts don't need PSI
-        # to run first). Rounded up to the next multiple of 50 with at
-        # least 50 rows of headroom, so the bound never lands exactly on
-        # any one party's true count.
-        raw_row_counts = [schema_results[fp1_org]["n_rows"], schema_results[fp2_org]["n_rows"],
-                           schema_results[label_org_id]["n_rows"]]
-        max_entities = ((max(raw_row_counts) // 50) + 2) * 50
-        agg_kwargs["max_entities"] = max_entities
-        info(f"Central (train {architecture}, {privacy_mode}): discovered raw row counts "
-             f"{raw_row_counts}, using PSI bound max_entities={max_entities}")
+        # R06 fix (residual gap): schema discovery is a separate, earlier
+        # task from the training task that actually reads the CSV again -
+        # nothing stops the file from changing in between (a boundary
+        # reading-once-during-training alone can't close, since it's a
+        # different task instance from discovery). Each party's OWN
+        # expected feature count, so the training task can compare its
+        # freshly-read data against what was discovered and fail clearly
+        # on a mismatch instead of silently training on a shape schema
+        # discovery never saw.
+        expected_n_features_by_client_id = {0: n_feat_a, 1: n_feat_b, 2: n_feat_c}
         # Feature counts are safe to auto-discover: each party's CSV
         # physically holds only its own columns, so "how many" is a
         # stable fact about the data regardless of which rows end up
@@ -315,19 +354,10 @@ def central_train(
         # known by actually running PSI. So n_samples is an explicit
         # argument the caller supplies (e.g. from a prior 'Run private
         # PSI' call's reported intersection_size) rather than guessed
-        # here - omitting it keeps today's proven default shape.
-        # The schema is ALWAYS sent when discovery ran - feature counts
-        # are always safe to auto-discover and forward (each party's CSV
-        # only ever holds its own columns), so they must never be
-        # silently dropped just because the row-count bound wasn't also
-        # overridden. Only n_samples itself falls back to the computing
-        # parties' current default (200) when not explicitly given -
-        # that field alone needs the caller's explicit opt-in, since it
-        # can't be safely auto-computed (see the comment above). Sending
-        # a schema that matches what's already compiled is a no-op for
-        # ensure_circuit_compiled (fingerprint match -> skip recompile),
-        # so this doesn't add any cost for the common case where the
-        # dataset's shape hasn't changed.
+        # here - omitting it keeps today's proven default shape. If the
+        # true intersection ever exceeds this bound, run_train_client*
+        # raises clearly rather than silently truncating (see
+        # mpc_daemon_client_v2.py) - unchanged by this fix.
         schema = {
             "n_samples": n_samples if n_samples is not None else 200,
             "n_feat_a": n_feat_a, "n_feat_b": n_feat_b, "n_feat_c": n_feat_c,
@@ -354,11 +384,26 @@ def central_train(
         # in vantage6 regardless of what central_train() itself returns -
         # without this, debug=False here would still leave raw
         # predictions sitting in every client subtask's own result.
-        client_kwargs = dict(kwargs, algorithm=algorithm, max_entities=max_entities, debug=debug)
+        client_kwargs = dict(kwargs, algorithm=algorithm, max_entities=max_entities, debug=debug,
+                              database_by_client_id=database_by_client_id,
+                              expected_n_features_by_client_id=expected_n_features_by_client_id)
         if n_samples is not None:
             client_kwargs["n_samples_bound"] = n_samples
     else:
-        client_kwargs = kwargs
+        # R06 fix: non_secure (vanilla) training needs the SAME database
+        # selection as secure mode - previously this branch sent the raw
+        # kwargs dict untouched, so every vanilla training path always
+        # read "heart_vfl" regardless of architecture, hitting the exact
+        # PSI/training divergence bug for aggVFL/splitVFL.
+        # R11 fix: max_entities is now forwarded here too (see the
+        # discovery block above, which computes it unconditionally) -
+        # previously this branch never sent it, so vanilla training's PSI
+        # step always used this daemon's own local default bound instead
+        # of a bound sized for the real dataset. No
+        # expected_n_features_by_client_id here: that field feeds the
+        # secure-mode-only schema-discovery-staleness check; non_secure
+        # has no compiled circuit for it to protect.
+        client_kwargs = dict(kwargs, max_entities=max_entities, database_by_client_id=database_by_client_id)
 
     tasks = {}
     if privacy_mode == "secure":
@@ -379,22 +424,27 @@ def central_train(
     else:
         for org_id in feature_org_ids:
             t = client.task.create(
-                input_={"method": spec["worker_action"], "kwargs": kwargs},
+                input_={"method": spec["worker_action"], "kwargs": client_kwargs},
                 organizations=[org_id],
                 name=f"train-{architecture}-worker-{org_id}",
             )
             tasks[org_id] = t["id"]
         t = client.task.create(
-            input_={"method": spec["coordinator_action"], "kwargs": kwargs},
+            input_={"method": spec["coordinator_action"], "kwargs": client_kwargs},
             organizations=[label_org_id],
             name=f"train-{architecture}-coordinator-{label_org_id}",
         )
         tasks[label_org_id] = t["id"]
         # Row alignment still needs the real Rep3 PSI circuit even in
         # non_secure mode - only the training math itself skips MPC.
+        # R11 fix: dispatch with agg_kwargs (carries max_entities), not
+        # the bare kwargs - previously the aggregator's own PSI party
+        # never received the discovered row-count bound either, so it
+        # fell back to its own local default regardless of the real
+        # dataset size.
         for org_id in agg_org_ids:
             t = client.task.create(
-                input_={"method": "psi_party_run", "kwargs": kwargs},
+                input_={"method": "psi_party_run", "kwargs": agg_kwargs},
                 organizations=[org_id],
                 name=f"train-{architecture}-psi-agg-{org_id}",
             )
@@ -417,10 +467,93 @@ def central_train(
     # (vanilla) mode's leak is deliberately left as-is for now (already
     # documented as insecure-by-design), so its subtasks still return raw
     # predictions with no hash - compared directly as before.
+    #
+    # R05 fix: predictions_agree (like central.py's clients_agree) is
+    # only computed over parties that actually completed - a prior
+    # version dropped failed/missing clients from both the agreement
+    # check and the party count, so e.g. 1 success + 2 failures could
+    # still report predictions_agree=True by trivially comparing one
+    # value to itself. clients_ok now requires EVERY expected client to
+    # have completed, and predictions_agree is only ever True when
+    # clients_ok is also True.
+    client_statuses = {org_id: (results.get(org_id) or {}).get("status") for org_id in client_org_ids}
+    aggregators_ok = all(
+        results.get(org_id) and results.get(org_id).get("status") == "complete"
+        for org_id in agg_org_ids
+    )
+
+    # EMPTY-INTERSECTION fix: an empty accepted intersection (no shared entities, or -
+    # for fuzzy matching - every candidate excluded as ambiguous) is an
+    # ordinary, valid outcome, not a failure. Each client party
+    # independently derives its own aligned count from its own PSI result
+    # and reports status="no_matches" when that count is zero (see
+    # run_train_client / run_vanilla_train's matching fix) - checked here
+    # as agreement across ALL clients, never inferred from just one
+    # client's result. A party that genuinely failed reports some OTHER
+    # status ("error", or missing entirely), which prevents this branch
+    # from firing at all - that case falls through to the ordinary
+    # success/incomplete logic below and is reported as a failure, not
+    # silently reinterpreted as an empty intersection. aggregators_ok is
+    # required too: their (fixed-shape, privacy-preserving) training
+    # circuit still runs to completion even when the real intersection is
+    # empty - see mpc_daemon_client_v2.py's matching fix for why the
+    # client side still completes that same connection rather than
+    # skipping it - so a genuinely empty run still expects them to report
+    # "complete" like any other run; an aggregator failure alongside
+    # all-clients-no_matches is still a real problem worth reporting as
+    # incomplete, not masked by the empty-intersection outcome.
+    #
+    # Known open limitation: this check only DETECTS disagreement among
+    # clients after their tasks have already run and returned - it cannot
+    # PREVENT one party's vanilla-mode task from hanging if it and
+    # another party land on different aligned counts for the same run
+    # (exact match's counts are consistent by construction; the current
+    # production fuzzy circuit's ambiguity-exclusion rule has not been
+    # independently verified to guarantee that same consistency across
+    # all 3 parties in every case - see mpc_daemon_client_v2.py's
+    # run_vanilla_train comment). Closing that gap needs a real
+    # pre-training coordination signal between parties, not just
+    # after-the-fact result comparison; that is not implemented here.
+    #
+    # Message wording: NOT "training skipped" - in secure mode the padded
+    # computation genuinely executes (aggregators complete their circuit
+    # normally, on an all-zero mask); nothing was skipped there. What's
+    # true in BOTH modes is that no usable model came out of it.
+    all_no_matches = all(s == "no_matches" for s in client_statuses.values())
+    if all_no_matches and aggregators_ok:
+        message = "No matching records; no model result produced."
+        info(f"Central (train {architecture}, {privacy_mode}): {message}")
+        return {
+            "summary": [
+                {"metric": "run_id", "value": run_id},
+                {"metric": "overall_status", "value": "no_matches"},
+                {"metric": "architecture", "value": architecture},
+                {"metric": "privacy_mode", "value": privacy_mode},
+                {"metric": "matching_method", "value": matching_method},
+                {"metric": "fuzzy_threshold", "value": fuzzy_threshold if matching_method == "fuzzy" else None},
+                {"metric": "aligned_count", "value": 0},
+                {"metric": "message", "value": message},
+            ],
+            "run_id": run_id,
+            "overall_status": "no_matches",
+            "architecture": architecture,
+            "privacy_mode": privacy_mode,
+            "matching_method": matching_method,
+            "fuzzy_threshold": fuzzy_threshold if matching_method == "fuzzy" else None,
+            "aligned_count": 0,
+            "predictions_agree": None,
+            "clients_ok": True,
+            "aggregators_ok": True,
+            "party_errors": {},
+            "message": message,
+        }
+
+    clients_ok = all(s == "complete" for s in client_statuses.values())
+
     predictions_by_org = {}
     for org_id in client_org_ids:
         r = results.get(org_id)
-        if r and r.get("status") == "complete":
+        if client_statuses[org_id] == "complete":
             predictions_by_org[org_id] = (
                 r.get("predictions_hash") if privacy_mode == "secure" else r.get("predictions")
             )
@@ -430,38 +563,55 @@ def central_train(
     def _agree_key(p):
         return p if privacy_mode == "secure" else tuple(p)
 
-    predictions_agree = (
-        len({_agree_key(p) for p in predictions_by_org.values() if p is not None}) <= 1
-        if predictions_by_org else None
-    )
+    predictions_agree = clients_ok and len(
+        {_agree_key(p) for p in predictions_by_org.values() if p is not None}
+    ) == 1
 
-    aggregators_ok = all(
-        results.get(org_id) and results.get(org_id).get("status") == "complete"
-        for org_id in agg_org_ids
-    )
+    # aggregators_ok computed earlier (needed there for the no_matches check too).
+    overall_status = "success" if (clients_ok and aggregators_ok and predictions_agree) else "incomplete"
 
-    info(f"Central (train {architecture}, {privacy_mode}): training complete - aligned_count={aligned_count} "
-         f"(predictions_agree={predictions_agree}, aggregators_ok={aggregators_ok})")
+    # Sanitized per-party errors, same rationale as central.py's R05
+    # fix: status + message only, surfaced for every party that did NOT
+    # complete regardless of debug.
+    party_errors = {}
+    for org_id in list(client_org_ids) + list(agg_org_ids):
+        r = results.get(org_id)
+        status = (r or {}).get("status")
+        if status != "complete":
+            party_errors[org_id] = {
+                "status": status,
+                "message": (r or {}).get("message", "no result received"),
+            }
+
+    info(f"Central (train {architecture}, {privacy_mode}): training {overall_status} - "
+         f"aligned_count={aligned_count} (predictions_agree={predictions_agree}, "
+         f"clients_ok={clients_ok}, aggregators_ok={aggregators_ok})"
+         + (f", errors={party_errors}" if party_errors else ""))
 
     output = {
         "summary": [
             {"metric": "run_id", "value": run_id},
+            {"metric": "overall_status", "value": overall_status},
             {"metric": "architecture", "value": architecture},
             {"metric": "privacy_mode", "value": privacy_mode},
             {"metric": "matching_method", "value": matching_method},
             {"metric": "fuzzy_threshold", "value": fuzzy_threshold if matching_method == "fuzzy" else None},
             {"metric": "aligned_count", "value": aligned_count},
             {"metric": "predictions_agree", "value": predictions_agree},
+            {"metric": "clients_ok", "value": clients_ok},
             {"metric": "aggregators_ok", "value": aggregators_ok},
         ],
         "run_id": run_id,
+        "overall_status": overall_status,
         "architecture": architecture,
         "privacy_mode": privacy_mode,
         "matching_method": matching_method,
         "fuzzy_threshold": fuzzy_threshold if matching_method == "fuzzy" else None,
         "aligned_count": aligned_count,
         "predictions_agree": predictions_agree,
+        "clients_ok": clients_ok,
         "aggregators_ok": aggregators_ok,
+        "party_errors": party_errors,
     }
 
     if debug:
