@@ -23,10 +23,21 @@ import time
 
 
 def _atomic_write_json(path, obj):
+    """Live-deployment bug found and fixed here: tempfile.mkstemp() always
+    creates its file mode 0600, ignoring umask - unlike the plain
+    open(path, "w") this replaced (which took the process's umask,
+    typically world-readable). This function runs INSIDE the vantage6
+    algorithm container as root (vantage6 nodes run Docker without user-
+    namespace remapping), writing job files the HOST daemon (a normal,
+    non-root user) must read back - a 0600 file owned by root is
+    unreadable to that reader, so every job silently ended up quarantined
+    instead of processed. chmod to 0644 before the rename restores
+    cross-UID readability while keeping the atomicity fix."""
     d = os.path.dirname(path) or "."
     os.makedirs(d, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=d, prefix=".tmp-", suffix=".json")
     try:
+        os.chmod(tmp_path, 0o644)
         with os.fdopen(fd, "w") as f:
             json.dump(obj, f)
         os.rename(tmp_path, path)
