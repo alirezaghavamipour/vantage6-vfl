@@ -69,7 +69,7 @@ _ARCHITECTURES = {
 }
 
 
-def _collective_fuzzy_experimental_check(client, client_org_ids, run_id, max_entities):
+def _collective_fuzzy_experimental_check(client, client_org_ids, agg_org_ids, run_id, max_entities):
     """F02 fix (fuzzy_experimental only): a genuine COLLECTIVE pre-training
     validity check, run to completion BEFORE any training task is
     dispatched to anyone. Per the review that paused production fuzzy
@@ -96,6 +96,13 @@ def _collective_fuzzy_experimental_check(client, client_org_ids, run_id, max_ent
     Returns (ok: bool, detail: dict) - detail holds only non-PII
     per-party status/local_valid/intersection_size/id-agreement info,
     safe to return directly in central_train's own result."""
+    # The computing parties must ALSO be dispatched (psi_party_run) -
+    # without this the psi_fuzzy_unique_triple circuit is never launched
+    # on the aggregators at all, and every client's psi_client_share
+    # fails immediately with a connection-refused error (a real bug
+    # caught live 2026-09-27: this function originally only dispatched
+    # to client_org_ids, mirroring central.py's OWN two-loop pattern was
+    # missed for this new function).
     tasks = {
         org_id: client.task.create(
             input_={"method": "psi_client_share", "kwargs": {
@@ -108,10 +115,30 @@ def _collective_fuzzy_experimental_check(client, client_org_ids, run_id, max_ent
         )["id"]
         for org_id in client_org_ids
     }
+    agg_tasks = {
+        org_id: client.task.create(
+            input_={"method": "psi_party_run", "kwargs": {
+                "matching_method": "fuzzy_experimental",
+                "run_id": run_id,
+                "max_entities": max_entities,
+            }},
+            organizations=[org_id], name=f"fuzzy-experimental-prealign-agg-{org_id}",
+        )["id"]
+        for org_id in agg_org_ids
+    }
     results = {}
     for org_id, task_id in tasks.items():
         res = client.wait_for_results(task_id=task_id)
         results[org_id] = res[0] if res else None
+    agg_results = {}
+    for org_id, task_id in agg_tasks.items():
+        res = client.wait_for_results(task_id=task_id)
+        agg_results[org_id] = res[0] if res else None
+
+    aggregators_ok = all(
+        agg_results.get(org_id) and agg_results.get(org_id).get("status") == "complete"
+        for org_id in agg_org_ids
+    )
 
     per_party = {}
     for org_id in client_org_ids:
@@ -122,7 +149,7 @@ def _collective_fuzzy_experimental_check(client, client_org_ids, run_id, max_ent
             "intersection_size": r.get("intersection_size"),
         }
 
-    all_complete = all(p["status"] == "complete" for p in per_party.values())
+    all_complete = aggregators_ok and all(p["status"] == "complete" for p in per_party.values())
     all_locally_valid = all_complete and all(p["local_valid"] is True for p in per_party.values())
     sizes = {p["intersection_size"] for p in per_party.values()} if all_complete else set()
     counts_agree = len(sizes) == 1
@@ -139,6 +166,7 @@ def _collective_fuzzy_experimental_check(client, client_org_ids, run_id, max_ent
     ok = all_complete and all_locally_valid and counts_agree and ids_agree
     detail = {
         "per_party": per_party,
+        "aggregators_ok": aggregators_ok,
         "all_complete": all_complete,
         "all_locally_valid": all_locally_valid,
         "counts_agree": counts_agree,
@@ -552,7 +580,7 @@ def central_train(
     # model result is produced.
     if matching_method == "fuzzy_experimental":
         alignment_ok, alignment_detail = _collective_fuzzy_experimental_check(
-            client, client_org_ids, run_id, max_entities,
+            client, client_org_ids, agg_org_ids, run_id, max_entities,
         )
         info(f"Central (train {architecture}, {privacy_mode}): fuzzy_experimental "
              f"collective alignment check {'PASSED' if alignment_ok else 'FAILED'} "
