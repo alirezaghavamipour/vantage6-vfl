@@ -29,7 +29,7 @@ SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
 def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2,
              run_id: str = None, max_entities: int = None, debug: bool = False,
-             reveal_align_keys: bool = False) -> dict:
+             reveal_align_keys: bool = False, database_by_client_id: dict = None) -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -69,6 +69,16 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     # schema discovery's reported row counts, not usually set by hand.
     if max_entities:
         job["max_entities"] = max_entities
+    # database_by_client_id: F02 fix - the collective check's own PSI run
+    # (psi_client_run, method="fuzzy_experimental") needs to read the SAME
+    # database a later training call for this party will (R06's own
+    # rationale - architectures where the label party's database differs,
+    # e.g. aggVFL/splitVFL, would otherwise silently compute alignment
+    # against the wrong dataset). Same shape/convention as train.py's own
+    # database_by_client_id - keyed by CLIENT_ID (stringified), each
+    # daemon self-selects its own entry.
+    if database_by_client_id:
+        job["database_by_client_id"] = database_by_client_id
     timeout = TIMEOUT_BY_METHOD.get(matching_method, 120)
     publish_job(JOBS_DIR, job)
     info(f"PSI: submitted job {job_id} (run_id={run_id}, {action}, method={matching_method}, "
@@ -81,7 +91,7 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
 
 def psi_client_share(matching_method: str = "exact", fuzzy_threshold: int = 2,
                       run_id: str = None, max_entities: int = None, debug: bool = False,
-                      reveal_align_keys: bool = False):
+                      reveal_align_keys: bool = False, database_by_client_id: dict = None):
     """Feature/label party: share local entity data into the MPC computation.
 
     matching_method: "exact" (hash-based exact match) or "fuzzy"
@@ -103,9 +113,12 @@ def psi_client_share(matching_method: str = "exact", fuzzy_threshold: int = 2,
     reveal_align_keys: narrower than debug - exposes only the opaque
     matched_align_keys (never matched_ids/matched_local_indices). See
     _redact_psi_result in mpc_daemon_client_v2.py.
+    database_by_client_id: F02 fix - see _run_job's own note. Only
+    matters for matching_method="fuzzy_experimental"; every other method
+    is unaffected.
     """
     return _run_job("psi_client_run", matching_method, fuzzy_threshold, run_id, max_entities, debug,
-                     reveal_align_keys=reveal_align_keys)
+                     reveal_align_keys=reveal_align_keys, database_by_client_id=database_by_client_id)
 
 
 def psi_party_run(matching_method: str = "exact", fuzzy_threshold: int = 2,

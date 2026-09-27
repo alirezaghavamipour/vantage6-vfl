@@ -69,7 +69,8 @@ _ARCHITECTURES = {
 }
 
 
-def _collective_fuzzy_experimental_check(client, client_org_ids, agg_org_ids, run_id, max_entities):
+def _collective_fuzzy_experimental_check(client, client_org_ids, agg_org_ids, run_id, max_entities,
+                                          database_by_client_id):
     """F02 fix (fuzzy_experimental only): a genuine COLLECTIVE pre-training
     validity check, run to completion BEFORE any training task is
     dispatched to anyone. Per the review that paused production fuzzy
@@ -103,6 +104,15 @@ def _collective_fuzzy_experimental_check(client, client_org_ids, agg_org_ids, ru
     # caught live 2026-09-27: this function originally only dispatched
     # to client_org_ids, mirroring central.py's OWN two-loop pattern was
     # missed for this new function).
+    # database_by_client_id: F02 fix - this PSI run must read the SAME
+    # dataset a later training call for this party will (R06's own
+    # rationale), or an artifact this check "approves" here (see
+    # _write_alignment_artifact in mpc_daemon_client_v2.py) could be
+    # computed against the wrong data for architectures where the label
+    # party's database differs (aggVFL/splitVFL) - without this, training
+    # would correctly detect the mismatch via its own database check and
+    # refuse to proceed, but the run would fail confusingly rather than
+    # validating the right thing the first time.
     tasks = {
         org_id: client.task.create(
             input_={"method": "psi_client_share", "kwargs": {
@@ -110,6 +120,7 @@ def _collective_fuzzy_experimental_check(client, client_org_ids, agg_org_ids, ru
                 "run_id": run_id,
                 "max_entities": max_entities,
                 "reveal_align_keys": True,
+                "database_by_client_id": database_by_client_id,
             }},
             organizations=[org_id], name=f"fuzzy-experimental-prealign-{org_id}",
         )["id"]
@@ -580,7 +591,7 @@ def central_train(
     # model result is produced.
     if matching_method == "fuzzy_experimental":
         alignment_ok, alignment_detail = _collective_fuzzy_experimental_check(
-            client, client_org_ids, agg_org_ids, run_id, max_entities,
+            client, client_org_ids, agg_org_ids, run_id, max_entities, database_by_client_id,
         )
         info(f"Central (train {architecture}, {privacy_mode}): fuzzy_experimental "
              f"collective alignment check {'PASSED' if alignment_ok else 'FAILED'} "
@@ -650,13 +661,25 @@ def central_train(
         # never received the discovered row-count bound either, so it
         # fell back to its own local default regardless of the real
         # dataset size.
-        for org_id in agg_org_ids:
-            t = client.task.create(
-                input_={"method": "psi_party_run", "kwargs": agg_kwargs},
-                organizations=[org_id],
-                name=f"train-{architecture}-psi-agg-{org_id}",
-            )
-            tasks[org_id] = t["id"]
+        #
+        # F02 fix: fuzzy_experimental is the ONE exception - the
+        # collective check (already run, already required to pass before
+        # this code is even reached) already ran this exact PSI
+        # computation once and produced validated alignment artifacts
+        # every worker/coordinator consumes directly (see
+        # mpc_daemon_client_v2.py's _get_psi_result), with no live PSI
+        # connection. Dispatching a SECOND aggregator psi_party_run here
+        # would have those aggregators launch the circuit and wait for
+        # client connections that are never coming, hanging until that
+        # job's own timeout.
+        if matching_method != "fuzzy_experimental":
+            for org_id in agg_org_ids:
+                t = client.task.create(
+                    input_={"method": "psi_party_run", "kwargs": agg_kwargs},
+                    organizations=[org_id],
+                    name=f"train-{architecture}-psi-agg-{org_id}",
+                )
+                tasks[org_id] = t["id"]
 
     info(f"Central (train {architecture}, {privacy_mode}): all {len(tasks)} sub-tasks submitted, waiting for results...")
 
@@ -685,10 +708,18 @@ def central_train(
     # have completed, and predictions_agree is only ever True when
     # clients_ok is also True.
     client_statuses = {org_id: (results.get(org_id) or {}).get("status") for org_id in client_org_ids}
-    aggregators_ok = all(
-        results.get(org_id) and results.get(org_id).get("status") == "complete"
-        for org_id in agg_org_ids
-    )
+    if privacy_mode == "non_secure" and matching_method == "fuzzy_experimental":
+        # No separate per-training aggregator task was dispatched for
+        # this method/mode combination (see the dispatch block above) -
+        # the aggregators already completed as part of the collective
+        # check, a required gate before this code is ever reached, so
+        # there is nothing new here to check.
+        aggregators_ok = True
+    else:
+        aggregators_ok = all(
+            results.get(org_id) and results.get(org_id).get("status") == "complete"
+            for org_id in agg_org_ids
+        )
 
     # EMPTY-INTERSECTION fix: an empty accepted intersection (no shared entities, or -
     # for fuzzy matching - every candidate excluded as ambiguous) is an
