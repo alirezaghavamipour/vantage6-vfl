@@ -43,6 +43,24 @@ def central(
     party's individual raw result - to avoid unnecessarily exposing
     e.g. each client's own local dataset size. Set debug=True to also
     include the full per-party results, for auditing one specific run.
+
+    F02: for matching_method="fuzzy" (the current production circuit),
+    this function's result is DIAGNOSTIC ONLY, never a validated training
+    alignment - matching_method="fuzzy" training is paused in
+    central_train for exactly this reason. clients_agree here only
+    compares each party's reported COUNT (intersection_size); it does not
+    verify that the underlying accepted entities/alignment keys actually
+    agree - a real run was observed with equal-looking counts that
+    disagreed once the underlying alignment keys were compared per-row
+    (see the F02 diagnostic in mpc_daemon_client_v2.py's
+    _find_duplicate_align_keys). Use this to investigate alignment
+    quality, not to certify it. matching_method="fuzzy_experimental" (the
+    corrected unique-triple circuit) does not have this specific gap in
+    its own matching logic, but calling it through this function still
+    only gets you the same count-level clients_agree, not the stronger
+    id-set check central_train's collective validation performs before
+    training - see _collective_fuzzy_experimental_check in
+    train_unified.py for that.
     """
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
@@ -175,6 +193,26 @@ def central(
          f"clients_agree={clients_agree}, clients_ok={clients_ok}, aggregators_ok={aggregators_ok}"
          + (f", errors={party_errors}" if party_errors else ""))
 
+    # F02: label this result explicitly, in the result itself and not
+    # just the docstring - "clients_agree" here is a COUNT match only,
+    # not proof the underlying alignment keys agree (see docstring for
+    # the real run where those diverged despite matching counts).
+    diagnostic_note = None
+    if matching_method == "fuzzy":
+        diagnostic_note = (
+            "DIAGNOSTIC ONLY, not a validated training alignment - "
+            "clients_agree compares counts only, not the underlying "
+            "alignment keys (see F02); matching_method='fuzzy' training "
+            "is paused in central_train for this reason."
+        )
+    elif matching_method == "fuzzy_experimental":
+        diagnostic_note = (
+            "Count-level agreement only (clients_agree) - this function "
+            "does not run the stronger collective id-set check "
+            "central_train performs before training "
+            "(_collective_fuzzy_experimental_check)."
+        )
+
     output = {
         "summary": [
             {"metric": "run_id", "value": run_id},
@@ -185,6 +223,7 @@ def central(
             {"metric": "clients_agree", "value": clients_agree},
             {"metric": "clients_ok", "value": clients_ok},
             {"metric": "aggregators_ok", "value": aggregators_ok},
+            {"metric": "diagnostic_note", "value": diagnostic_note},
         ],
         "run_id": run_id,
         "overall_status": overall_status,
@@ -195,6 +234,7 @@ def central(
         "clients_ok": clients_ok,
         "aggregators_ok": aggregators_ok,
         "party_errors": party_errors,
+        "diagnostic_note": diagnostic_note,
     }
 
     if debug:

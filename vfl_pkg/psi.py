@@ -14,7 +14,7 @@ RESULTS_DIR = os.path.join(BRIDGE, "results")
 # canonicalization) does more MPC work than exact-hash matching - measured
 # at ~14 minutes at this deployment's scale (833s, real measured run, not
 # an estimate), vs seconds for exact. Timeout kept well above that.
-TIMEOUT_BY_METHOD = {"exact": 120, "fuzzy": 1500}
+TIMEOUT_BY_METHOD = {"exact": 120, "fuzzy": 1500, "fuzzy_experimental": 900}
 
 # The edit-distance threshold shapes the MPC circuit itself (band width),
 # so it can't be a runtime argument to an already-compiled program - only
@@ -23,7 +23,8 @@ SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
 
 def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2,
-             run_id: str = None, max_entities: int = None, debug: bool = False) -> dict:
+             run_id: str = None, max_entities: int = None, debug: bool = False,
+             reveal_align_keys: bool = False) -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -42,6 +43,13 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     # this subtask's result is separately queryable in vantage6.
     if debug:
         job["debug"] = True
+    # reveal_align_keys: F02 collective-validation fix - a narrower opt-in
+    # than debug, exposing ONLY matched_align_keys (opaque integers, never
+    # names) alongside the always-present local_valid flag. Lets
+    # central_train's pre-training collective check compare every party's
+    # accepted alignment-ID set without disclosing matched_ids.
+    if reveal_align_keys:
+        job["reveal_align_keys"] = True
     # run_id ties every job dispatched by one orchestrator call (central())
     # together across however many hosts they land on - job_id alone is
     # only unique to this one job, with nothing connecting it to its
@@ -67,7 +75,8 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
 
 
 def psi_client_share(matching_method: str = "exact", fuzzy_threshold: int = 2,
-                      run_id: str = None, max_entities: int = None, debug: bool = False):
+                      run_id: str = None, max_entities: int = None, debug: bool = False,
+                      reveal_align_keys: bool = False):
     """Feature/label party: share local entity data into the MPC computation.
 
     matching_method: "exact" (hash-based exact match) or "fuzzy"
@@ -86,8 +95,12 @@ def psi_client_share(matching_method: str = "exact", fuzzy_threshold: int = 2,
     by central()'s own aggregation (it only needs intersection_size), so
     leaving this False keeps them out of this subtask's stored result
     too, not just out of central()'s filtered top-level summary.
+    reveal_align_keys: narrower than debug - exposes only the opaque
+    matched_align_keys (never matched_ids/matched_local_indices). See
+    _redact_psi_result in mpc_daemon_client_v2.py.
     """
-    return _run_job("psi_client_run", matching_method, fuzzy_threshold, run_id, max_entities, debug)
+    return _run_job("psi_client_run", matching_method, fuzzy_threshold, run_id, max_entities, debug,
+                     reveal_align_keys=reveal_align_keys)
 
 
 def psi_party_run(matching_method: str = "exact", fuzzy_threshold: int = 2,

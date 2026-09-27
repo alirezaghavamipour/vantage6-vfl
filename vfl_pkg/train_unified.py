@@ -7,6 +7,17 @@ from vantage6.algorithm.tools.util import info
 
 SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
+# EXPERIMENTAL fuzzy PSI (F02/F03 redesign): strict unique-triple
+# acceptance + exhaustive matching + R13 consecutive alignment IDs,
+# reached only via matching_method="fuzzy_experimental" - completely
+# separate from matching_method="fuzzy" (the OLD circuit, still paused
+# below). No runtime capacity parameter yet - 350 is the exact bound
+# this circuit was oracle-verified and byte-identical-bytecode-verified
+# at (see fuzzy-psi-redesign/variant_forrangeBC_capacity350/r13_hardened/
+# RESULTS.md); a larger real dataset needs a newly benchmarked circuit
+# before this bound can move, not just a bigger number here.
+FUZZY_EXPERIMENTAL_MAX_ENTITIES = 350
+
 # Maps (architecture, privacy_mode) to the underlying daemon actions to
 # dispatch. "secure" always uses one uniform action for every client
 # (feature and label parties are symmetric from the MPC circuit's point
@@ -56,6 +67,85 @@ _ARCHITECTURES = {
         },
     },
 }
+
+
+def _collective_fuzzy_experimental_check(client, client_org_ids, run_id, max_entities):
+    """F02 fix (fuzzy_experimental only): a genuine COLLECTIVE pre-training
+    validity check, run to completion BEFORE any training task is
+    dispatched to anyone. Per the review that paused production fuzzy
+    training: a per-party local guard alone is not a safe abort mechanism
+    (in this architecture only LP computes the shared training mask, from
+    its OWN local view - another party privately blanking its own
+    contribution does not stop LP from still running training with a mask
+    that marks those positions "real"). This instead runs
+    matching_method="fuzzy_experimental" PSI standalone first (via
+    psi_client_share, reveal_align_keys=True so it can see the non-PII
+    matched_align_keys/local_valid fields, never matched_ids), and only
+    allows training to be dispatched at all when EVERY party is
+    individually valid (no local duplicate alignment key) AND all three
+    parties' accepted alignment-ID SETS agree exactly - not just their
+    counts, which "Equal counts are insufficient" for. The
+    psi_fuzzy_unique_triple circuit's own R13 consecutive-numbering
+    scheme (0..K-1, the same for every party under a consistent match)
+    makes that set comparison direct, with no PII involved.
+
+    Any single failure means NO training task is dispatched to ANY party -
+    one shared, coordinated reject, not a per-party decision made
+    independently by each computing party's own mask.
+
+    Returns (ok: bool, detail: dict) - detail holds only non-PII
+    per-party status/local_valid/intersection_size/id-agreement info,
+    safe to return directly in central_train's own result."""
+    tasks = {
+        org_id: client.task.create(
+            input_={"method": "psi_client_share", "kwargs": {
+                "matching_method": "fuzzy_experimental",
+                "run_id": run_id,
+                "max_entities": max_entities,
+                "reveal_align_keys": True,
+            }},
+            organizations=[org_id], name=f"fuzzy-experimental-prealign-{org_id}",
+        )["id"]
+        for org_id in client_org_ids
+    }
+    results = {}
+    for org_id, task_id in tasks.items():
+        res = client.wait_for_results(task_id=task_id)
+        results[org_id] = res[0] if res else None
+
+    per_party = {}
+    for org_id in client_org_ids:
+        r = results.get(org_id) or {}
+        per_party[org_id] = {
+            "status": r.get("status"),
+            "local_valid": r.get("local_valid"),
+            "intersection_size": r.get("intersection_size"),
+        }
+
+    all_complete = all(p["status"] == "complete" for p in per_party.values())
+    all_locally_valid = all_complete and all(p["local_valid"] is True for p in per_party.values())
+    sizes = {p["intersection_size"] for p in per_party.values()} if all_complete else set()
+    counts_agree = len(sizes) == 1
+    k = next(iter(sizes)) if counts_agree else None
+
+    ids_agree = False
+    if all_locally_valid and counts_agree:
+        expected = set(range(k))
+        for org_id in client_org_ids:
+            id_set = set((results.get(org_id) or {}).get("matched_align_keys") or [])
+            per_party[org_id]["id_set_matches_expected"] = (id_set == expected)
+        ids_agree = all(p["id_set_matches_expected"] for p in per_party.values())
+
+    ok = all_complete and all_locally_valid and counts_agree and ids_agree
+    detail = {
+        "per_party": per_party,
+        "all_complete": all_complete,
+        "all_locally_valid": all_locally_valid,
+        "counts_agree": counts_agree,
+        "ids_agree": ids_agree,
+        "aligned_count": k if ok else None,
+    }
+    return ok, detail
 
 
 @algorithm_client
@@ -356,6 +446,22 @@ def central_train(
     raw_row_counts = [schema_results[fp1_org]["n_rows"], schema_results[fp2_org]["n_rows"],
                        schema_results[label_org_id]["n_rows"]]
     max_entities = ((max(raw_row_counts) // 50) + 2) * 50
+    if matching_method == "fuzzy_experimental":
+        # This experimental circuit has no runtime capacity parameter -
+        # see FUZZY_EXPERIMENTAL_MAX_ENTITIES's own comment. Clamp/reject
+        # explicitly here rather than letting the auto-computed bound
+        # silently exceed what was actually validated (ensure_psi_compiled
+        # would also reject a mismatched bound on the aggregator side, but
+        # failing here is clearer and avoids dispatching any task first).
+        if max_entities > FUZZY_EXPERIMENTAL_MAX_ENTITIES:
+            raise ValueError(
+                f"fuzzy_experimental's raw dataset needs max_entities="
+                f"{max_entities} (from discovered row counts {raw_row_counts}), "
+                f"but this experimental circuit is only compiled/validated for "
+                f"capacity {FUZZY_EXPERIMENTAL_MAX_ENTITIES} - a larger capacity "
+                f"needs its own benchmarked-and-validated circuit first"
+            )
+        max_entities = FUZZY_EXPERIMENTAL_MAX_ENTITIES
     agg_kwargs["max_entities"] = max_entities
     info(f"Central (train {architecture}, {privacy_mode}): discovered raw row counts "
          f"{raw_row_counts}, using PSI bound max_entities={max_entities}")
@@ -435,6 +541,49 @@ def central_train(
         # secure-mode-only schema-discovery-staleness check; non_secure
         # has no compiled circuit for it to protect.
         client_kwargs = dict(kwargs, max_entities=max_entities, database_by_client_id=database_by_client_id)
+
+    # F02 fix (fuzzy_experimental only): collective pre-training validity
+    # check, run to completion before ANY training or PSI-computing-party
+    # task is dispatched. See _collective_fuzzy_experimental_check's own
+    # docstring for why a per-party guard alone (the old production
+    # circuit's only defense) is not sufficient. On any disagreement, this
+    # is a coordinated reject - no party's training task is ever created,
+    # not just the party that happened to detect the problem - and no
+    # model result is produced.
+    if matching_method == "fuzzy_experimental":
+        alignment_ok, alignment_detail = _collective_fuzzy_experimental_check(
+            client, client_org_ids, run_id, max_entities,
+        )
+        info(f"Central (train {architecture}, {privacy_mode}): fuzzy_experimental "
+             f"collective alignment check {'PASSED' if alignment_ok else 'FAILED'} "
+             f"- {alignment_detail}")
+        if not alignment_ok:
+            message = (
+                "Collective alignment validation failed for "
+                "matching_method='fuzzy_experimental' - no training task was "
+                "dispatched to any party, and no model result was produced. "
+                "See 'alignment_detail' for the non-PII per-party diagnostic "
+                "(status/local_valid/intersection_size/id-set agreement)."
+            )
+            return {
+                "summary": [
+                    {"metric": "run_id", "value": run_id},
+                    {"metric": "overall_status", "value": "alignment_error"},
+                    {"metric": "architecture", "value": architecture},
+                    {"metric": "privacy_mode", "value": privacy_mode},
+                    {"metric": "matching_method", "value": matching_method},
+                    {"metric": "message", "value": message},
+                ],
+                "run_id": run_id,
+                "overall_status": "alignment_error",
+                "architecture": architecture,
+                "privacy_mode": privacy_mode,
+                "matching_method": matching_method,
+                "fuzzy_threshold": None,
+                "aligned_count": None,
+                "message": message,
+                "alignment_detail": alignment_detail,
+            }
 
     tasks = {}
     if privacy_mode == "secure":
