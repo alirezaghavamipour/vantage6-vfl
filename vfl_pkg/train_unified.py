@@ -186,6 +186,37 @@ def central_train(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
             f"(choose one of {SUPPORTED_FUZZY_THRESHOLDS})"
         )
+    # F02: production fuzzy training is PAUSED. Diagnosed live
+    # (2026-09-27): the fuzzy circuit can bind more than one of a
+    # party's own local rows to the same alignment key, and different
+    # parties' accepted-key SETS were not even consistent with each
+    # other for one run of identical input (one party had an accepted
+    # entity none of the others had any row bound to at all). A local,
+    # per-party guard exists in the daemon (rejects training when a
+    # party sees a duplicate on its own side) but is NOT sufficient by
+    # itself: in this architecture only LP computes the shared training
+    # mask, from its OWN local view - if FP1 or FP2 detects a problem
+    # and blanks its own contribution while LP does not detect anything
+    # on ITS side, training still runs, combining FP1/FP2's zeroed
+    # features with LP's real labels under a mask that still marks
+    # those positions "real" - silently invalid training, not a safely
+    # skipped run. Re-enabling fuzzy training needs either a genuine
+    # collective pre-training validity check (every party's local
+    # validity AND their ordered alignment-key lists cross-verified,
+    # with a shared - not per-party - decision to disable the whole
+    # computation on any mismatch) or the corrected unique-triple
+    # circuit, neither of which exists yet. Standalone PSI (psi_client_share/
+    # psi_party_run, central()) is NOT affected - it's still the
+    # diagnostic tool for validating alignment while this is worked on.
+    if matching_method == "fuzzy":
+        raise ValueError(
+            "fuzzy-match training is temporarily disabled (F02: the fuzzy PSI "
+            "circuit can produce duplicate/inconsistent alignment keys across "
+            "parties, and no collective cross-party validity check exists yet "
+            "to safely refuse training on that outcome) - use matching_method="
+            "'exact' for training; fuzzy PSI itself (central()/psi_client_share) "
+            "is unaffected and remains available for diagnosis"
+        )
     if algorithm not in ("logistic", "linear"):
         raise ValueError(
             f"algorithm={algorithm!r} is not supported "
