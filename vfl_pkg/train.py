@@ -33,7 +33,8 @@ SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2,
              run_id: str = None, schema: dict = None, algorithm: str = None,
              n_samples_bound: int = None, max_entities: int = None, debug: bool = False,
-             database_by_client_id: dict = None, expected_n_features_by_client_id: dict = None) -> dict:
+             database_by_client_id: dict = None, expected_n_features_by_client_id: dict = None,
+             approved_mapping_digest_by_client_id: dict = None) -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -91,6 +92,13 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
         job["database_by_client_id"] = database_by_client_id
     if expected_n_features_by_client_id:
         job["expected_n_features_by_client_id"] = expected_n_features_by_client_id
+    # G01 fix: each client's own APPROVED mapping digest (see
+    # train_unified.py's _collective_fuzzy_experimental_check) - keyed
+    # by CLIENT_ID, same convention as database_by_client_id. Only ever
+    # set for matching_method="fuzzy_experimental"; every other method
+    # ignores it.
+    if approved_mapping_digest_by_client_id:
+        job["approved_mapping_digest_by_client_id"] = approved_mapping_digest_by_client_id
     publish_job(JOBS_DIR, job)
     info(f"Train: submitted job {job_id} ({action}, method={matching_method}, "
          f"fuzzy_threshold={fuzzy_threshold}), waiting for host daemon...")
@@ -103,7 +111,8 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
 def train_client_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
                       run_id: str = None, algorithm: str = None, n_samples_bound: int = None,
                       max_entities: int = None, debug: bool = False,
-                      database_by_client_id: dict = None, expected_n_features_by_client_id: dict = None):
+                      database_by_client_id: dict = None, expected_n_features_by_client_id: dict = None,
+                      approved_mapping_digest_by_client_id: dict = None):
     """Feature/label party: align rows and share this party's own columns
     into the aggVFLc training computation.
 
@@ -128,7 +137,8 @@ def train_client_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
     return _run_job("train_client_run", matching_method, fuzzy_threshold, run_id,
                      algorithm=algorithm, n_samples_bound=n_samples_bound, max_entities=max_entities,
                      debug=debug, database_by_client_id=database_by_client_id,
-                     expected_n_features_by_client_id=expected_n_features_by_client_id)
+                     expected_n_features_by_client_id=expected_n_features_by_client_id,
+                     approved_mapping_digest_by_client_id=approved_mapping_digest_by_client_id)
 
 
 def train_party_run(matching_method: str = "exact", fuzzy_threshold: int = 2,

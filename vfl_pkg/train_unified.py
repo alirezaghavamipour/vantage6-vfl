@@ -70,7 +70,7 @@ _ARCHITECTURES = {
 
 
 def _collective_fuzzy_experimental_check(client, client_org_ids, agg_org_ids, run_id, max_entities,
-                                          database_by_client_id):
+                                          database_by_client_id, expected_client_id):
     """F02 fix (fuzzy_experimental only): a genuine COLLECTIVE pre-training
     validity check, run to completion BEFORE any training task is
     dispatched to anyone. Per the review that paused production fuzzy
@@ -94,9 +94,23 @@ def _collective_fuzzy_experimental_check(client, client_org_ids, agg_org_ids, ru
     one shared, coordinated reject, not a per-party decision made
     independently by each computing party's own mask.
 
-    Returns (ok: bool, detail: dict) - detail holds only non-PII
-    per-party status/local_valid/intersection_size/id-agreement info,
-    safe to return directly in central_train's own result."""
+    G01 fix: also collects each party's mapping_digest (an opaque hash
+    of its own accepted (local_index, alignment_id) pairing - see
+    mpc_daemon_client_v2.py's _mapping_digest) and, only once every
+    other check here has passed, returns it keyed by CLIENT_ID as
+    approved_mapping_digest_by_client_id. central_train forwards this
+    to training UNCHANGED - it is the value _load_alignment_artifact
+    later requires an exact match against, recomputed from whatever is
+    actually on disk at consumption time. This is what makes the digest
+    a genuine approval binding rather than something read back from the
+    same (mutable) artifact file it's meant to protect: it never
+    round-trips through that file at all.
+
+    Returns (ok: bool, detail: dict, approved_mapping_digest_by_client_id:
+    dict) - detail holds only non-PII per-party status/local_valid/
+    intersection_size/id-agreement info, safe to return directly in
+    central_train's own result. approved_mapping_digest_by_client_id is
+    None when ok is False (nothing to approve)."""
     # The computing parties must ALSO be dispatched (psi_party_run) -
     # without this the psi_fuzzy_unique_triple circuit is never launched
     # on the aggregators at all, and every client's psi_client_share
@@ -184,7 +198,16 @@ def _collective_fuzzy_experimental_check(client, client_org_ids, agg_org_ids, ru
         "ids_agree": ids_agree,
         "aligned_count": k if ok else None,
     }
-    return ok, detail
+    # G01 fix: only ever built when the check as a whole passed - an
+    # approved digest for a run that DIDN'T pass would be meaningless
+    # (and training is never dispatched for it anyway).
+    approved_mapping_digest_by_client_id = None
+    if ok:
+        approved_mapping_digest_by_client_id = {
+            str(expected_client_id[org_id]): (results.get(org_id) or {}).get("mapping_digest")
+            for org_id in client_org_ids
+        }
+    return ok, detail, approved_mapping_digest_by_client_id
 
 
 @algorithm_client
@@ -590,12 +613,18 @@ def central_train(
     # not just the party that happened to detect the problem - and no
     # model result is produced.
     if matching_method == "fuzzy_experimental":
-        alignment_ok, alignment_detail = _collective_fuzzy_experimental_check(
+        alignment_ok, alignment_detail, approved_mapping_digest_by_client_id = _collective_fuzzy_experimental_check(
             client, client_org_ids, agg_org_ids, run_id, max_entities, database_by_client_id,
+            expected_client_id,
         )
         info(f"Central (train {architecture}, {privacy_mode}): fuzzy_experimental "
              f"collective alignment check {'PASSED' if alignment_ok else 'FAILED'} "
              f"- {alignment_detail}")
+        if alignment_ok:
+            # G01 fix: forward each party's OWN approved digest - never
+            # read back from its artifact file, see
+            # _collective_fuzzy_experimental_check's own docstring.
+            client_kwargs["approved_mapping_digest_by_client_id"] = approved_mapping_digest_by_client_id
         if not alignment_ok:
             message = (
                 "Collective alignment validation failed for "
@@ -708,12 +737,16 @@ def central_train(
     # have completed, and predictions_agree is only ever True when
     # clients_ok is also True.
     client_statuses = {org_id: (results.get(org_id) or {}).get("status") for org_id in client_org_ids}
-    if privacy_mode == "non_secure" and matching_method == "fuzzy_experimental":
-        # No separate per-training aggregator task was dispatched for
-        # this method/mode combination (see the dispatch block above) -
-        # the aggregators already completed as part of the collective
-        # check, a required gate before this code is ever reached, so
-        # there is nothing new here to check.
+    # G05 fix: named once, reused below for party_errors too - no
+    # separate per-training aggregator task is dispatched for this
+    # method/mode combination (see the dispatch block above), so
+    # agg_org_ids simply has no entry in `results` and `tasks` for this
+    # phase; both aggregators_ok and party_errors must treat that as
+    # "nothing new to check here" rather than "didn't complete".
+    agg_dispatched_this_phase = not (privacy_mode == "non_secure" and matching_method == "fuzzy_experimental")
+    if not agg_dispatched_this_phase:
+        # The aggregators already completed as part of the collective
+        # check, a required gate before this code is ever reached.
         aggregators_ok = True
     else:
         aggregators_ok = all(
@@ -812,8 +845,15 @@ def central_train(
     # Sanitized per-party errors, same rationale as central.py's R05
     # fix: status + message only, surfaced for every party that did NOT
     # complete regardless of debug.
+    #
+    # G05 fix: only checks agg_org_ids when a per-training aggregator
+    # task was actually dispatched this phase (see agg_dispatched_this_
+    # phase above) - otherwise a successful non_secure/fuzzy_experimental
+    # run reported 3 phantom "no result received" errors for aggregators
+    # that were correctly never asked to do anything in this phase.
     party_errors = {}
-    for org_id in list(client_org_ids) + list(agg_org_ids):
+    check_org_ids = list(client_org_ids) + (list(agg_org_ids) if agg_dispatched_this_phase else [])
+    for org_id in check_org_ids:
         r = results.get(org_id)
         status = (r or {}).get("status")
         if status != "complete":
