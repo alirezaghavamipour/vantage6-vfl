@@ -16,7 +16,16 @@ RESULTS_DIR = os.path.join(BRIDGE, "results")
 # take up to the ~3600s the aggregators allow it (see vantage6-vfl-psi's
 # own fuzzy timeout). Give the vantage6 task layer enough headroom to
 # never time out before the daemon's own worst case is exhausted.
-TRAIN_TIMEOUT = 5000
+# fuzzy_experimental training re-runs PSI (REAL measurement: 4576s /
+# ~76 min on this deployment's actual WAN topology - see
+# mpc_daemon_agg_v2.py's own TIMEOUT_BY_METHOD comment, ~10.8x the
+# benchmark harness's own ~426s figure) before the training circuit
+# itself runs at all, plus central_train's own COLLECTIVE pre-flight
+# PSI check runs the same PSI step once more beforehand (a separate
+# task, not counted in this timeout). Kept comfortably above the
+# aggregator's own 9000s worst case for the PSI step alone, with
+# headroom left for the training step after it.
+TRAIN_TIMEOUT = 11000
 
 SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 

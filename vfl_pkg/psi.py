@@ -14,7 +14,12 @@ RESULTS_DIR = os.path.join(BRIDGE, "results")
 # canonicalization) does more MPC work than exact-hash matching - measured
 # at ~14 minutes at this deployment's scale (833s, real measured run, not
 # an estimate), vs seconds for exact. Timeout kept well above that.
-TIMEOUT_BY_METHOD = {"exact": 120, "fuzzy": 1500, "fuzzy_experimental": 900}
+# fuzzy_experimental: see mpc_daemon_agg_v2.py's own TIMEOUT_BY_METHOD
+# comment - REAL measurement 4576s (~76 min) on this deployment's actual
+# WAN topology, ~10.8x the benchmark harness's own ~426s figure. Kept
+# comfortably above the aggregator's own 9000s subprocess timeout so
+# this client-side wait is never the first thing to expire.
+TIMEOUT_BY_METHOD = {"exact": 120, "fuzzy": 1500, "fuzzy_experimental": 9300}
 
 # The edit-distance threshold shapes the MPC circuit itself (band width),
 # so it can't be a runtime argument to an already-compiled program - only
