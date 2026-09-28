@@ -4,6 +4,8 @@ from vantage6.algorithm.tools.decorators import algorithm_client
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.util import info
 
+from . import _psi_capacity
+
 
 SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
@@ -15,6 +17,7 @@ def central(
     agg_org_ids: list,
     matching_method: str = "exact",
     fuzzy_threshold: int = 2,
+    psi_capacity: int = None,
     debug: bool = False,
 ):
     """
@@ -61,6 +64,14 @@ def central(
     id-set check central_train's collective validation performs before
     training - see _collective_fuzzy_experimental_check in
     train_unified.py for that.
+
+    psi_capacity (matching_method="fuzzy_experimental" only): which
+    precompiled PSI capacity to use - 100, 350, 700, or 1000 raw
+    candidate rows per party. None uses the default (350). Schema
+    discovery (report_schema_run) is dispatched to every client first,
+    to learn the real raw row counts; rejection then happens clearly,
+    before any PSI or training execution task is launched, if those
+    counts exceed the selected capacity - never silently truncated.
     """
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
@@ -100,6 +111,13 @@ def central(
                        for org_id, task_id in schema_tasks.items()}
     raw_row_counts = [schema_results[org_id]["n_rows"] for org_id in client_org_ids]
     max_entities = ((max(raw_row_counts) // 50) + 2) * 50
+    if matching_method == "fuzzy_experimental":
+        # Manual capacity selection (Phase 1, 2026-09-28): resolves
+        # psi_capacity (explicit selection, or the default) against the
+        # supported/validated set, and rejects clearly - before any
+        # task is dispatched - if the real dataset's raw row count
+        # exceeds it. See _psi_capacity.py.
+        max_entities = _psi_capacity.resolve_capacity(psi_capacity, max_entities, raw_row_counts)
     info(f"Central: discovered raw row counts {raw_row_counts}, using PSI bound max_entities={max_entities}")
     kwargs["max_entities"] = max_entities
 

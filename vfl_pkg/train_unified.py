@@ -4,6 +4,8 @@ from vantage6.algorithm.tools.decorators import algorithm_client
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.util import info
 
+from . import _psi_capacity
+
 
 SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
@@ -11,12 +13,15 @@ SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 # acceptance + exhaustive matching + R13 consecutive alignment IDs,
 # reached only via matching_method="fuzzy_experimental" - completely
 # separate from matching_method="fuzzy" (the OLD circuit, still paused
-# below). No runtime capacity parameter yet - 350 is the exact bound
-# this circuit was oracle-verified and byte-identical-bytecode-verified
-# at (see fuzzy-psi-redesign/variant_forrangeBC_capacity350/r13_hardened/
-# RESULTS.md); a larger real dataset needs a newly benchmarked circuit
-# before this bound can move, not just a bigger number here.
-FUZZY_EXPERIMENTAL_MAX_ENTITIES = 350
+# below).
+#
+# Manual capacity selection (Phase 1, 2026-09-28): 100/350/700/1000,
+# each independently compiled/validated - see _psi_capacity.py for the
+# shared capacity set and daemons/psi_fuzzy_capacity.py for the
+# matching daemon-side program/port mapping. psi_capacity below lets a
+# caller (the UI, or a direct script) select one explicitly; None uses
+# _psi_capacity.DEFAULT_FUZZY_EXPERIMENTAL_CAPACITY (350), preserving
+# this deployment's exact pre-selection behavior.
 
 # Maps (architecture, privacy_mode) to the underlying daemon actions to
 # dispatch. "secure" always uses one uniform action for every client
@@ -220,6 +225,7 @@ def central_train(
     privacy_mode: str = "secure",
     matching_method: str = "exact",
     fuzzy_threshold: int = 2,
+    psi_capacity: int = None,
     n_samples: int = None,
     algorithm: str = "logistic",
     debug: bool = False,
@@ -271,6 +277,15 @@ def central_train(
 
     matching_method / fuzzy_threshold: see 'Run private PSI' for the
     full explanation of exact vs. fuzzy entity matching.
+
+    psi_capacity (matching_method="fuzzy_experimental" only): which
+    precompiled PSI capacity to use - 100, 350, 700, or 1000 raw
+    candidate rows per party. None uses the default (350). Schema
+    discovery (report_schema_run) is dispatched to every client first,
+    to learn the real raw row counts; rejection then happens clearly,
+    before any PSI or training execution task is launched, if those
+    counts exceed the selected capacity - never silently truncated to
+    fit.
 
     n_samples (secure mode only, advanced): the training circuits are
     compiled for a fixed row-count BOUND, not an exact count - the true
@@ -509,21 +524,14 @@ def central_train(
                        schema_results[label_org_id]["n_rows"]]
     max_entities = ((max(raw_row_counts) // 50) + 2) * 50
     if matching_method == "fuzzy_experimental":
-        # This experimental circuit has no runtime capacity parameter -
-        # see FUZZY_EXPERIMENTAL_MAX_ENTITIES's own comment. Clamp/reject
-        # explicitly here rather than letting the auto-computed bound
-        # silently exceed what was actually validated (ensure_psi_compiled
-        # would also reject a mismatched bound on the aggregator side, but
-        # failing here is clearer and avoids dispatching any task first).
-        if max_entities > FUZZY_EXPERIMENTAL_MAX_ENTITIES:
-            raise ValueError(
-                f"fuzzy_experimental's raw dataset needs max_entities="
-                f"{max_entities} (from discovered row counts {raw_row_counts}), "
-                f"but this experimental circuit is only compiled/validated for "
-                f"capacity {FUZZY_EXPERIMENTAL_MAX_ENTITIES} - a larger capacity "
-                f"needs its own benchmarked-and-validated circuit first"
-            )
-        max_entities = FUZZY_EXPERIMENTAL_MAX_ENTITIES
+        # Manual capacity selection (Phase 1, 2026-09-28): resolves
+        # psi_capacity (explicit selection, or the default) against the
+        # supported/validated set, and rejects clearly - before any
+        # task is dispatched - if the real dataset's raw row count
+        # exceeds it. ensure_psi_compiled on the aggregator side would
+        # also reject a mismatched bound, but failing here is clearer
+        # and avoids dispatching any task first. See _psi_capacity.py.
+        max_entities = _psi_capacity.resolve_capacity(psi_capacity, max_entities, raw_row_counts)
     agg_kwargs["max_entities"] = max_entities
     info(f"Central (train {architecture}, {privacy_mode}): discovered raw row counts "
          f"{raw_row_counts}, using PSI bound max_entities={max_entities}")
