@@ -75,7 +75,8 @@ _ARCHITECTURES = {
 
 
 def _collective_fuzzy_experimental_check(client, client_org_ids, agg_org_ids, run_id, max_entities,
-                                          database_by_client_id, expected_client_id, capacity_mode="manual"):
+                                          database_by_client_id, expected_client_id, fuzzy_threshold,
+                                          capacity_mode="manual"):
     """F02 fix (fuzzy_experimental only): a genuine COLLECTIVE pre-training
     validity check, run to completion BEFORE any training task is
     dispatched to anyone. Per the review that paused production fuzzy
@@ -115,7 +116,27 @@ def _collective_fuzzy_experimental_check(client, client_org_ids, agg_org_ids, ru
     dict) - detail holds only non-PII per-party status/local_valid/
     intersection_size/id-agreement info, safe to return directly in
     central_train's own result. approved_mapping_digest_by_client_id is
-    None when ok is False (nothing to approve)."""
+    None when ok is False (nothing to approve).
+
+    k=1 Stage 3 fix: fuzzy_threshold is now a required parameter,
+    threaded into both dispatched jobs' kwargs below. Before this fix,
+    this function's own psi_client_share/psi_party_run dispatch never
+    included fuzzy_threshold at all, silently falling back to that
+    wrapped function's own default (2) regardless of what threshold the
+    caller actually requested - so this collective check (and the
+    artifact it approves and writes) always ran at k=2 even when
+    central_train() was called with fuzzy_threshold=1, while the
+    SEPARATE training dispatch just below correctly forwarded the real
+    requested threshold. The result was every k=1 secure training call
+    failing collectively at the artifact-load step with "alignment
+    artifact was computed for fuzzy_threshold=2, but training requested
+    1" - a real, previously-undetected gap in threshold propagation,
+    caught by Stage 3's own real end-to-end central_train() test (Stage
+    1/2 never exercised this function directly). Fixed by requiring the
+    caller to pass fuzzy_threshold explicitly, same no-default
+    convention _load_alignment_artifact's own approved_mapping_digest
+    parameter already uses, for the same reason: silently defaulting
+    here would defeat the point as surely as silently skipping would."""
     # The computing parties must ALSO be dispatched (psi_party_run) -
     # without this the psi_fuzzy_unique_triple circuit is never launched
     # on the aggregators at all, and every client's psi_client_share
@@ -136,6 +157,7 @@ def _collective_fuzzy_experimental_check(client, client_org_ids, agg_org_ids, ru
         org_id: client.task.create(
             input_={"method": "psi_client_share", "kwargs": {
                 "matching_method": "fuzzy_experimental",
+                "fuzzy_threshold": fuzzy_threshold,
                 "run_id": run_id,
                 "max_entities": max_entities,
                 "reveal_align_keys": True,
@@ -150,6 +172,7 @@ def _collective_fuzzy_experimental_check(client, client_org_ids, agg_org_ids, ru
         org_id: client.task.create(
             input_={"method": "psi_party_run", "kwargs": {
                 "matching_method": "fuzzy_experimental",
+                "fuzzy_threshold": fuzzy_threshold,
                 "run_id": run_id,
                 "max_entities": max_entities,
                 "capacity_mode": capacity_mode,
@@ -383,6 +406,12 @@ def central_train(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
             f"(choose one of {SUPPORTED_FUZZY_THRESHOLDS})"
         )
+    if matching_method == "fuzzy_experimental":
+        # k=1 addition: previously unvalidated at this layer - see
+        # _psi_capacity.SUPPORTED_FUZZY_EXPERIMENTAL_THRESHOLDS's own
+        # docstring for why this is a separate constant/check from the
+        # "fuzzy" branch just above.
+        _psi_capacity.validate_fuzzy_experimental_threshold(fuzzy_threshold)
     if psi_capacity_mode not in ("manual", "automatic"):
         raise ValueError(
             f"psi_capacity_mode={psi_capacity_mode!r} is not supported "
@@ -728,7 +757,7 @@ def central_train(
     if matching_method == "fuzzy_experimental":
         alignment_ok, alignment_detail, approved_mapping_digest_by_client_id = _collective_fuzzy_experimental_check(
             client, client_org_ids, agg_org_ids, run_id, max_entities, database_by_client_id,
-            expected_client_id, capacity_mode="dynamic" if is_automatic_capacity else "manual",
+            expected_client_id, fuzzy_threshold, capacity_mode="dynamic" if is_automatic_capacity else "manual",
         )
         info(f"Central (train {architecture}, {privacy_mode}): fuzzy_experimental "
              f"collective alignment check {'PASSED' if alignment_ok else 'FAILED'} "

@@ -105,6 +105,12 @@ def central(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
             f"(choose one of {SUPPORTED_FUZZY_THRESHOLDS})"
         )
+    if matching_method == "fuzzy_experimental":
+        # k=1 addition: previously unvalidated at this layer - see
+        # _psi_capacity.SUPPORTED_FUZZY_EXPERIMENTAL_THRESHOLDS's own
+        # docstring for why this is a separate constant/check from the
+        # "fuzzy" branch just above.
+        _psi_capacity.validate_fuzzy_experimental_threshold(fuzzy_threshold)
     if psi_capacity_mode not in ("manual", "automatic"):
         raise ValueError(
             f"psi_capacity_mode={psi_capacity_mode!r} is not supported "

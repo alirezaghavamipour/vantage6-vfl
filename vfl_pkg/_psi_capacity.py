@@ -31,6 +31,31 @@ import json
 SUPPORTED_FUZZY_EXPERIMENTAL_CAPACITIES = (100, 350, 700, 1000)
 DEFAULT_FUZZY_EXPERIMENTAL_CAPACITY = 350
 
+# k=1 addition: a SEPARATE constant from psi.py's/central.py's/
+# train_unified.py's own SUPPORTED_FUZZY_THRESHOLDS=(1,2,3) - that one
+# belongs to the OLD, still-disabled matching_method="fuzzy" path and
+# is intentionally untouched here. fuzzy_experimental's own threshold
+# support is narrower (only what has an actual compiled circuit) and
+# was never validated at all before this addition - previously any
+# fuzzy_threshold value silently passed straight through to the daemons
+# for matching_method="fuzzy_experimental" with no upfront rejection.
+SUPPORTED_FUZZY_EXPERIMENTAL_THRESHOLDS = (1, 2)
+DEFAULT_FUZZY_EXPERIMENTAL_THRESHOLD = 2
+
+
+def validate_fuzzy_experimental_threshold(fuzzy_threshold):
+    """Rejects clearly, before any task is dispatched, an unsupported
+    fuzzy_experimental threshold - mirrors resolve_capacity's own
+    fail-fast pattern above. Called by central()/central_train() only
+    when matching_method="fuzzy_experimental"; the old "fuzzy" method's
+    own (1,2,3) validation is untouched and lives elsewhere."""
+    if fuzzy_threshold not in SUPPORTED_FUZZY_EXPERIMENTAL_THRESHOLDS:
+        raise ValueError(
+            f"fuzzy_threshold={fuzzy_threshold!r} is not a supported, "
+            f"compiled fuzzy_experimental threshold (supported: "
+            f"{sorted(SUPPORTED_FUZZY_EXPERIMENTAL_THRESHOLDS)})"
+        )
+
 # Phase 2 Stage 3: automatic capacity mode. psi_capacity="auto" bypasses
 # the manual menu above entirely - the actual capacity is negotiated
 # privately at run time (see train_unified.py's
