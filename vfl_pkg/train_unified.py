@@ -75,7 +75,7 @@ _ARCHITECTURES = {
 
 
 def _collective_fuzzy_experimental_check(client, client_org_ids, agg_org_ids, run_id, max_entities,
-                                          database_by_client_id, expected_client_id):
+                                          database_by_client_id, expected_client_id, capacity_mode="manual"):
     """F02 fix (fuzzy_experimental only): a genuine COLLECTIVE pre-training
     validity check, run to completion BEFORE any training task is
     dispatched to anyone. Per the review that paused production fuzzy
@@ -140,6 +140,7 @@ def _collective_fuzzy_experimental_check(client, client_org_ids, agg_org_ids, ru
                 "max_entities": max_entities,
                 "reveal_align_keys": True,
                 "database_by_client_id": database_by_client_id,
+                "capacity_mode": capacity_mode,
             }},
             organizations=[org_id], name=f"fuzzy-experimental-prealign-{org_id}",
         )["id"]
@@ -151,6 +152,7 @@ def _collective_fuzzy_experimental_check(client, client_org_ids, agg_org_ids, ru
                 "matching_method": "fuzzy_experimental",
                 "run_id": run_id,
                 "max_entities": max_entities,
+                "capacity_mode": capacity_mode,
             }},
             organizations=[org_id], name=f"fuzzy-experimental-prealign-agg-{org_id}",
         )["id"]
@@ -226,6 +228,7 @@ def central_train(
     matching_method: str = "exact",
     fuzzy_threshold: int = 2,
     psi_capacity: int = None,
+    psi_capacity_mode: str = "manual",
     n_samples: int = None,
     algorithm: str = "logistic",
     debug: bool = False,
@@ -278,14 +281,41 @@ def central_train(
     matching_method / fuzzy_threshold: see 'Run private PSI' for the
     full explanation of exact vs. fuzzy entity matching.
 
-    psi_capacity (matching_method="fuzzy_experimental" only): which
-    precompiled PSI capacity to use - 100, 350, 700, or 1000 raw
-    candidate rows per party. None uses the default (350). Schema
-    discovery (report_schema_run) is dispatched to every client first,
-    to learn the real raw row counts; rejection then happens clearly,
-    before any PSI or training execution task is launched, if those
-    counts exceed the selected capacity - never silently truncated to
-    fit.
+    psi_capacity_mode (matching_method="fuzzy_experimental" only):
+    "manual" (default) or "automatic". Kept as a SEPARATE argument from
+    psi_capacity below - rather than letting psi_capacity itself accept
+    a string sentinel like "auto" - specifically so the UI's existing
+    integer capacity dropdown keeps one consistent type; overloading it
+    with an occasional string value is a schema-mismatch risk for the
+    UI layer, not just a Python typing nicety.
+
+    psi_capacity (matching_method="fuzzy_experimental",
+    psi_capacity_mode="manual" only): which precompiled PSI capacity to
+    use - 100, 350, 700, or 1000 raw candidate rows per party. None
+    uses the default (350). Schema discovery (report_schema_run) is
+    dispatched to every client first, to learn the real raw row counts
+    in the clear; rejection then happens clearly, before any PSI or
+    training execution task is launched, if those counts exceed the
+    selected capacity - never silently truncated to fit. Ignored when
+    psi_capacity_mode="automatic" (see below) - manual mode's own
+    precompiled-circuit behavior is otherwise completely unchanged.
+
+    When psi_capacity_mode="automatic" (Phase 2 Stage 3/4), the exact
+    capacity is negotiated privately instead: schema discovery never
+    learns row counts in this mode (only feature/column counts) - the
+    maximum row count across all 3 parties IS revealed (that is the
+    mechanism), but no individual party's count ever is. That maximum
+    becomes max_entities directly (any integer 1..1000). The
+    corresponding circuit is then compiled on demand - first use at a
+    given exact capacity takes noticeably longer (compilation time),
+    later runs at the same exact capacity reuse the cached build - and
+    every aggregator must independently report an identical build
+    fingerprint and bytecode hash (the build-agreement barrier) before
+    PSI is dispatched - a missing/failed/disagreeing build aborts the
+    whole run, the same coordinated-reject shape as a failed collective
+    alignment check below. Initial support: matching_method=
+    "fuzzy_experimental", fuzzy_threshold=2 only, up to 1000 raw rows
+    per party.
 
     n_samples (secure mode only, advanced): the training circuits are
     compiled for a fixed row-count BOUND, not an exact count - the true
@@ -353,6 +383,18 @@ def central_train(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
             f"(choose one of {SUPPORTED_FUZZY_THRESHOLDS})"
         )
+    if psi_capacity_mode not in ("manual", "automatic"):
+        raise ValueError(
+            f"psi_capacity_mode={psi_capacity_mode!r} is not supported "
+            f"(choose 'manual' or 'automatic')"
+        )
+    if psi_capacity_mode == "automatic":
+        # Normalizes onto the SAME internal sentinel Stage 3's own
+        # direct-call interface already uses (psi_capacity="auto") -
+        # is_automatic_capacity below is unchanged either way, so a
+        # direct caller passing psi_capacity="auto" without setting
+        # this new argument keeps working exactly as already tested.
+        psi_capacity = _psi_capacity.AUTOMATIC_CAPACITY_SENTINEL
     # F02: production fuzzy training is PAUSED. Diagnosed live
     # (2026-09-27): the fuzzy circuit can bind more than one of a
     # party's own local rows to the same alignment key, and different
@@ -465,17 +507,38 @@ def central_train(
     agg_kwargs = dict(kwargs)
     fp1_org, fp2_org = feature_org_ids[0], feature_org_ids[1]
 
+    # Phase 2 Stage 3/4: automatic capacity mode - psi_capacity == "auto"
+    # negotiates max_entities privately (see
+    # _psi_capacity.negotiate_automatic_capacity, shared with central())
+    # instead of computing it from raw row counts, so schema discovery
+    # must never expose n_rows in this mode. Checked once here, reused
+    # for both the schema-dispatch kwargs below and the branch further
+    # down that decides how max_entities gets resolved.
+    is_automatic_capacity = (
+        matching_method == "fuzzy_experimental"
+        and psi_capacity == _psi_capacity.AUTOMATIC_CAPACITY_SENTINEL
+    )
+
     schema_tasks = {
         fp1_org: client.task.create(
-            input_={"method": "report_schema_run", "kwargs": {"database": database_by_client_id[0], "run_id": run_id}},
+            input_={"method": "report_schema_run", "kwargs": {
+                "database": database_by_client_id[0], "run_id": run_id,
+                "include_row_count": not is_automatic_capacity,
+            }},
             organizations=[fp1_org], name=f"schema-{architecture}-{fp1_org}",
         )["id"],
         fp2_org: client.task.create(
-            input_={"method": "report_schema_run", "kwargs": {"database": database_by_client_id[1], "run_id": run_id}},
+            input_={"method": "report_schema_run", "kwargs": {
+                "database": database_by_client_id[1], "run_id": run_id,
+                "include_row_count": not is_automatic_capacity,
+            }},
             organizations=[fp2_org], name=f"schema-{architecture}-{fp2_org}",
         )["id"],
         label_org_id: client.task.create(
-            input_={"method": "report_schema_run", "kwargs": {"database": database_by_client_id[2], "run_id": run_id}},
+            input_={"method": "report_schema_run", "kwargs": {
+                "database": database_by_client_id[2], "run_id": run_id,
+                "include_row_count": not is_automatic_capacity,
+            }},
             organizations=[label_org_id], name=f"schema-{architecture}-{label_org_id}",
         )["id"],
     }
@@ -520,21 +583,63 @@ def central_train(
     # matched count, raw counts don't need PSI to run first). Rounded up
     # to the next multiple of 50 with at least 50 rows of headroom, so
     # the bound never lands exactly on any one party's true count.
-    raw_row_counts = [schema_results[fp1_org]["n_rows"], schema_results[fp2_org]["n_rows"],
-                       schema_results[label_org_id]["n_rows"]]
-    max_entities = ((max(raw_row_counts) // 50) + 2) * 50
-    if matching_method == "fuzzy_experimental":
-        # Manual capacity selection (Phase 1, 2026-09-28): resolves
-        # psi_capacity (explicit selection, or the default) against the
-        # supported/validated set, and rejects clearly - before any
-        # task is dispatched - if the real dataset's raw row count
-        # exceeds it. ensure_psi_compiled on the aggregator side would
-        # also reject a mismatched bound, but failing here is clearer
-        # and avoids dispatching any task first. See _psi_capacity.py.
-        max_entities = _psi_capacity.resolve_capacity(psi_capacity, max_entities, raw_row_counts)
+    if is_automatic_capacity:
+        # Row counts were never learned in the clear (include_row_count
+        # was False above) - max_entities instead comes from private
+        # row-count discovery + the build-agreement barrier. Any
+        # failure here is a coordinated reject: no PSI or training task
+        # is dispatched to any party, exactly like a failed
+        # _collective_fuzzy_experimental_check below.
+        negotiation_ok, max_entities, negotiation_detail = _psi_capacity.negotiate_automatic_capacity(
+            client, client_org_ids, agg_org_ids, run_id, fuzzy_threshold,
+            database_by_client_id=database_by_client_id,
+        )
+        info(f"Central (train {architecture}, {privacy_mode}): automatic capacity negotiation "
+             f"{'PASSED' if negotiation_ok else 'FAILED'} - {negotiation_detail}")
+        if not negotiation_ok:
+            message = (
+                "Automatic capacity negotiation failed - no PSI or training task was "
+                "dispatched to any party, and no model result was produced. See "
+                "'negotiation_detail' for the non-PII diagnostic (no individual row "
+                "counts are ever included)."
+            )
+            return {
+                "summary": [
+                    {"metric": "run_id", "value": run_id},
+                    {"metric": "overall_status", "value": "capacity_negotiation_error"},
+                    {"metric": "architecture", "value": architecture},
+                    {"metric": "privacy_mode", "value": privacy_mode},
+                    {"metric": "matching_method", "value": matching_method},
+                    {"metric": "message", "value": message},
+                ],
+                "run_id": run_id,
+                "overall_status": "capacity_negotiation_error",
+                "architecture": architecture,
+                "privacy_mode": privacy_mode,
+                "matching_method": matching_method,
+                "fuzzy_threshold": None,
+                "aligned_count": None,
+                "message": message,
+                "negotiation_detail": negotiation_detail,
+            }
+        raw_row_counts = None  # never learned in this mode - see include_row_count above
+    else:
+        raw_row_counts = [schema_results[fp1_org]["n_rows"], schema_results[fp2_org]["n_rows"],
+                           schema_results[label_org_id]["n_rows"]]
+        max_entities = ((max(raw_row_counts) // 50) + 2) * 50
+        if matching_method == "fuzzy_experimental":
+            # Manual capacity selection (Phase 1, 2026-09-28): resolves
+            # psi_capacity (explicit selection, or the default) against the
+            # supported/validated set, and rejects clearly - before any
+            # task is dispatched - if the real dataset's raw row count
+            # exceeds it. ensure_psi_compiled on the aggregator side would
+            # also reject a mismatched bound, but failing here is clearer
+            # and avoids dispatching any task first. See _psi_capacity.py.
+            max_entities = _psi_capacity.resolve_capacity(psi_capacity, max_entities, raw_row_counts)
     agg_kwargs["max_entities"] = max_entities
-    info(f"Central (train {architecture}, {privacy_mode}): discovered raw row counts "
-         f"{raw_row_counts}, using PSI bound max_entities={max_entities}")
+    info(f"Central (train {architecture}, {privacy_mode}): "
+         + (f"automatic capacity negotiated max_entities={max_entities}" if is_automatic_capacity
+            else f"discovered raw row counts {raw_row_counts}, using PSI bound max_entities={max_entities}"))
 
     if privacy_mode == "secure":
         n_feat_a = schema_results[fp1_org]["n_features"]
@@ -623,7 +728,7 @@ def central_train(
     if matching_method == "fuzzy_experimental":
         alignment_ok, alignment_detail, approved_mapping_digest_by_client_id = _collective_fuzzy_experimental_check(
             client, client_org_ids, agg_org_ids, run_id, max_entities, database_by_client_id,
-            expected_client_id,
+            expected_client_id, capacity_mode="dynamic" if is_automatic_capacity else "manual",
         )
         info(f"Central (train {architecture}, {privacy_mode}): fuzzy_experimental "
              f"collective alignment check {'PASSED' if alignment_ok else 'FAILED'} "

@@ -15,7 +15,7 @@ RESULTS_DIR = os.path.join(BRIDGE, "results")
 TIMEOUT = 60
 
 
-def report_schema_run(database: str = None, run_id: str = None):
+def report_schema_run(database: str = None, run_id: str = None, include_row_count: bool = True):
     """Feature/label party: report this party's local row count and
     feature-column count for the given database, read directly from its
     own CSV (every column except full_name/target) - lets central_train
@@ -30,6 +30,11 @@ def report_schema_run(database: str = None, run_id: str = None):
     central_train per party's role, not meant to be chosen by hand.
     run_id: shared identifier set by central_train to correlate this job
     with the other jobs dispatched by the same orchestrated run.
+    include_row_count: Phase 2 Stage 3 - False for automatic capacity
+    mode (psi_capacity="auto"), which discovers row counts exclusively
+    through the private row-count-discovery MPC circuit instead. This
+    party's n_rows is then omitted from the result entirely (not
+    zeroed/redacted-in-place); n_features/client_id are unaffected.
     """
     job_id = str(uuid.uuid4())
     job = {"job_id": job_id, "action": "report_schema"}
@@ -37,6 +42,8 @@ def report_schema_run(database: str = None, run_id: str = None):
         job["database"] = database
     if run_id:
         job["run_id"] = run_id
+    if not include_row_count:
+        job["include_row_count"] = False
     os.makedirs(JOBS_DIR, exist_ok=True)
     with open(os.path.join(JOBS_DIR, job_id + ".json"), "w") as f:
         json.dump(job, f)

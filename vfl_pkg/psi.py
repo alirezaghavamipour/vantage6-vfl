@@ -29,7 +29,8 @@ SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
 def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2,
              run_id: str = None, max_entities: int = None, debug: bool = False,
-             reveal_align_keys: bool = False, database_by_client_id: dict = None) -> dict:
+             reveal_align_keys: bool = False, database_by_client_id: dict = None,
+             capacity_mode: str = "manual") -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -79,6 +80,15 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     # daemon self-selects its own entry.
     if database_by_client_id:
         job["database_by_client_id"] = database_by_client_id
+    # capacity_mode: Phase 2 Stage 3 - "manual" (default, unchanged) or
+    # "dynamic" (automatic capacity mode - max_entities was negotiated
+    # privately rather than chosen from the manual menu; the daemon
+    # routes to dynamic_psi_capacity's own program/port instead of
+    # psi_fuzzy_capacity's). Only ever "dynamic" when
+    # train_unified.py's _collective_fuzzy_experimental_check is called
+    # with capacity_mode="dynamic" from the automatic-mode branch.
+    if capacity_mode != "manual":
+        job["capacity_mode"] = capacity_mode
     timeout = TIMEOUT_BY_METHOD.get(matching_method, 120)
     publish_job(JOBS_DIR, job)
     info(f"PSI: submitted job {job_id} (run_id={run_id}, {action}, method={matching_method}, "
@@ -91,7 +101,8 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
 
 def psi_client_share(matching_method: str = "exact", fuzzy_threshold: int = 2,
                       run_id: str = None, max_entities: int = None, debug: bool = False,
-                      reveal_align_keys: bool = False, database_by_client_id: dict = None):
+                      reveal_align_keys: bool = False, database_by_client_id: dict = None,
+                      capacity_mode: str = "manual"):
     """Feature/label party: share local entity data into the MPC computation.
 
     matching_method: "exact" (hash-based exact match) or "fuzzy"
@@ -118,14 +129,16 @@ def psi_client_share(matching_method: str = "exact", fuzzy_threshold: int = 2,
     is unaffected.
     """
     return _run_job("psi_client_run", matching_method, fuzzy_threshold, run_id, max_entities, debug,
-                     reveal_align_keys=reveal_align_keys, database_by_client_id=database_by_client_id)
+                     reveal_align_keys=reveal_align_keys, database_by_client_id=database_by_client_id,
+                     capacity_mode=capacity_mode)
 
 
 def psi_party_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
-                   run_id: str = None, max_entities: int = None):
+                   run_id: str = None, max_entities: int = None, capacity_mode: str = "manual"):
     """Computing party: run this party's role in the Rep3 PSI computation.
 
     run_id: see psi_client_share - shared identifier set by central() for
     cross-host job correlation. max_entities: see psi_client_share.
     """
-    return _run_job("psi_party_run", matching_method, fuzzy_threshold, run_id, max_entities)
+    return _run_job("psi_party_run", matching_method, fuzzy_threshold, run_id, max_entities,
+                     capacity_mode=capacity_mode)

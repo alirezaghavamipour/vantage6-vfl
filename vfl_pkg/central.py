@@ -18,6 +18,7 @@ def central(
     matching_method: str = "exact",
     fuzzy_threshold: int = 2,
     psi_capacity: int = None,
+    psi_capacity_mode: str = "manual",
     debug: bool = False,
 ):
     """
@@ -65,19 +66,57 @@ def central(
     training - see _collective_fuzzy_experimental_check in
     train_unified.py for that.
 
-    psi_capacity (matching_method="fuzzy_experimental" only): which
-    precompiled PSI capacity to use - 100, 350, 700, or 1000 raw
-    candidate rows per party. None uses the default (350). Schema
-    discovery (report_schema_run) is dispatched to every client first,
-    to learn the real raw row counts; rejection then happens clearly,
-    before any PSI or training execution task is launched, if those
-    counts exceed the selected capacity - never silently truncated.
+    psi_capacity_mode (matching_method="fuzzy_experimental" only):
+    "manual" (default) or "automatic". Kept as a SEPARATE argument from
+    psi_capacity below - rather than letting psi_capacity itself accept
+    a string sentinel like "auto" - specifically so the UI's existing
+    integer capacity dropdown keeps one consistent type; overloading it
+    with an occasional string value is a schema-mismatch risk for the
+    UI layer, not just a Python typing nicety.
+
+    psi_capacity (matching_method="fuzzy_experimental",
+    psi_capacity_mode="manual" only): which precompiled PSI capacity to
+    use - 100, 350, 700, or 1000 raw candidate rows per party. None
+    uses the default (350). Schema discovery (report_schema_run) is
+    dispatched to every client first, to learn the real raw row counts
+    in the clear; rejection then happens clearly, before any PSI
+    execution task is launched, if those counts exceed the selected
+    capacity - never silently truncated. Ignored when
+    psi_capacity_mode="automatic" (see below) - manual mode's own
+    precompiled-circuit behavior is otherwise completely unchanged.
+
+    When psi_capacity_mode="automatic" (Phase 2 Stage 4), the exact
+    capacity is negotiated privately instead: schema discovery never
+    learns row counts in this mode - the maximum row count across all
+    clients IS revealed (that is the mechanism), but no individual
+    party's count ever is. That maximum becomes the PSI capacity
+    directly (any integer 1..1000). The corresponding circuit is then
+    compiled on demand - first use at a given exact capacity takes
+    noticeably longer (compilation time), later runs at the same exact
+    capacity reuse the cached build - and every aggregator must
+    independently report an identical build fingerprint and bytecode
+    hash before PSI is dispatched; a missing/failed/disagreeing build
+    aborts the whole run before any PSI execution starts. Initial
+    support: matching_method="fuzzy_experimental", fuzzy_threshold=2
+    only, up to 1000 raw rows per party.
     """
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
             f"(choose one of {SUPPORTED_FUZZY_THRESHOLDS})"
         )
+    if psi_capacity_mode not in ("manual", "automatic"):
+        raise ValueError(
+            f"psi_capacity_mode={psi_capacity_mode!r} is not supported "
+            f"(choose 'manual' or 'automatic')"
+        )
+    if psi_capacity_mode == "automatic":
+        # Normalizes onto the SAME internal sentinel Stage 3's own
+        # direct-call interface already uses (psi_capacity="auto") -
+        # is_automatic_capacity below is unchanged either way, so a
+        # direct caller passing psi_capacity="auto" without setting
+        # this new argument keeps working exactly as already tested.
+        psi_capacity = _psi_capacity.AUTOMATIC_CAPACITY_SENTINEL
 
     # Ties every job this run dispatches - across all client and
     # aggregator hosts - back to this one orchestrated run, so anyone
@@ -91,6 +130,16 @@ def central(
 
     kwargs = {"matching_method": matching_method, "fuzzy_threshold": fuzzy_threshold, "run_id": run_id}
 
+    # Phase 2 Stage 4: automatic capacity mode - psi_capacity == "auto"
+    # negotiates max_entities privately (_psi_capacity.negotiate_automatic_
+    # capacity, shared with central_train()) instead of computing it from
+    # raw row counts, so schema discovery must never expose n_rows in
+    # this mode.
+    is_automatic_capacity = (
+        matching_method == "fuzzy_experimental"
+        and psi_capacity == _psi_capacity.AUTOMATIC_CAPACITY_SENTINEL
+    )
+
     # Schema discovery: ask each party its own raw row count (read
     # straight from its CSV) before dispatching PSI, so the computing
     # parties can compile a correctly-shaped PSI circuit for this run's
@@ -99,26 +148,61 @@ def central(
     # needs to cover raw candidate counts, which don't require running
     # PSI first to learn (no chicken-and-egg problem). Rounded up to the
     # next multiple of 50 with at least 50 rows of headroom, so the
-    # bound never lands exactly on any one party's true count.
+    # bound never lands exactly on any one party's true count. Skipped
+    # entirely for automatic mode below - private row-count discovery
+    # replaces it.
     schema_tasks = {
         org_id: client.task.create(
-            input_={"method": "report_schema_run", "kwargs": {"run_id": run_id}},
+            input_={"method": "report_schema_run", "kwargs": {
+                "run_id": run_id, "include_row_count": not is_automatic_capacity,
+            }},
             organizations=[org_id], name=f"schema-psi-{org_id}",
         )["id"]
         for org_id in client_org_ids
     }
     schema_results = {org_id: client.wait_for_results(task_id=task_id)[0]
                        for org_id, task_id in schema_tasks.items()}
-    raw_row_counts = [schema_results[org_id]["n_rows"] for org_id in client_org_ids]
-    max_entities = ((max(raw_row_counts) // 50) + 2) * 50
-    if matching_method == "fuzzy_experimental":
-        # Manual capacity selection (Phase 1, 2026-09-28): resolves
-        # psi_capacity (explicit selection, or the default) against the
-        # supported/validated set, and rejects clearly - before any
-        # task is dispatched - if the real dataset's raw row count
-        # exceeds it. See _psi_capacity.py.
-        max_entities = _psi_capacity.resolve_capacity(psi_capacity, max_entities, raw_row_counts)
-    info(f"Central: discovered raw row counts {raw_row_counts}, using PSI bound max_entities={max_entities}")
+
+    if is_automatic_capacity:
+        negotiation_ok, max_entities, negotiation_detail = _psi_capacity.negotiate_automatic_capacity(
+            client, client_org_ids, agg_org_ids, run_id, fuzzy_threshold,
+        )
+        info(f"Central: automatic capacity negotiation {'PASSED' if negotiation_ok else 'FAILED'} "
+             f"- {negotiation_detail}")
+        if not negotiation_ok:
+            message = (
+                "Automatic capacity negotiation failed - no PSI task was dispatched to "
+                "any party, and no result was produced. See 'negotiation_detail' for the "
+                "non-PII diagnostic (no individual row counts are ever included)."
+            )
+            return {
+                "summary": [
+                    {"metric": "run_id", "value": run_id},
+                    {"metric": "overall_status", "value": "capacity_negotiation_error"},
+                    {"metric": "matching_method", "value": matching_method},
+                    {"metric": "message", "value": message},
+                ],
+                "run_id": run_id,
+                "overall_status": "capacity_negotiation_error",
+                "matching_method": matching_method,
+                "fuzzy_threshold": None,
+                "intersection_size": None,
+                "message": message,
+                "negotiation_detail": negotiation_detail,
+            }
+        kwargs["capacity_mode"] = "dynamic"
+        info(f"Central: automatic capacity negotiated max_entities={max_entities}")
+    else:
+        raw_row_counts = [schema_results[org_id]["n_rows"] for org_id in client_org_ids]
+        max_entities = ((max(raw_row_counts) // 50) + 2) * 50
+        if matching_method == "fuzzy_experimental":
+            # Manual capacity selection (Phase 1, 2026-09-28): resolves
+            # psi_capacity (explicit selection, or the default) against the
+            # supported/validated set, and rejects clearly - before any
+            # task is dispatched - if the real dataset's raw row count
+            # exceeds it. See _psi_capacity.py.
+            max_entities = _psi_capacity.resolve_capacity(psi_capacity, max_entities, raw_row_counts)
+        info(f"Central: discovered raw row counts {raw_row_counts}, using PSI bound max_entities={max_entities}")
     kwargs["max_entities"] = max_entities
 
     # debug is threaded down to each client party's own subtask (not just
