@@ -34,7 +34,7 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
              run_id: str = None, schema: dict = None, algorithm: str = None,
              n_samples_bound: int = None, max_entities: int = None, debug: bool = False,
              database_by_client_id: dict = None, expected_n_features_by_client_id: dict = None,
-             approved_mapping_digest_by_client_id: dict = None) -> dict:
+             approved_mapping_digest_by_client_id: dict = None, capacity_mode: str = "manual") -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -99,6 +99,14 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     # ignores it.
     if approved_mapping_digest_by_client_id:
         job["approved_mapping_digest_by_client_id"] = approved_mapping_digest_by_client_id
+    # count-disclosure fix: forwarded so the daemon can tell whether an
+    # alignment-artifact validation failure's error message may include
+    # this party's raw local_count - see mpc_daemon_client_v2.py's
+    # _validate_artifact_schema(redact_counts=). Training never needed
+    # capacity_mode before (it reads an already-written artifact rather
+    # than re-running PSI, so no port/program selection depends on it).
+    if capacity_mode != "manual":
+        job["capacity_mode"] = capacity_mode
     publish_job(JOBS_DIR, job)
     info(f"Train: submitted job {job_id} ({action}, method={matching_method}, "
          f"fuzzy_threshold={fuzzy_threshold}), waiting for host daemon...")
@@ -112,7 +120,7 @@ def train_client_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
                       run_id: str = None, algorithm: str = None, n_samples_bound: int = None,
                       max_entities: int = None, debug: bool = False,
                       database_by_client_id: dict = None, expected_n_features_by_client_id: dict = None,
-                      approved_mapping_digest_by_client_id: dict = None):
+                      approved_mapping_digest_by_client_id: dict = None, capacity_mode: str = "manual"):
     """Feature/label party: align rows and share this party's own columns
     into the aggVFLc training computation.
 
@@ -138,7 +146,8 @@ def train_client_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
                      algorithm=algorithm, n_samples_bound=n_samples_bound, max_entities=max_entities,
                      debug=debug, database_by_client_id=database_by_client_id,
                      expected_n_features_by_client_id=expected_n_features_by_client_id,
-                     approved_mapping_digest_by_client_id=approved_mapping_digest_by_client_id)
+                     approved_mapping_digest_by_client_id=approved_mapping_digest_by_client_id,
+                     capacity_mode=capacity_mode)
 
 
 def train_party_run(matching_method: str = "exact", fuzzy_threshold: int = 2,

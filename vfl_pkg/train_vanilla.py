@@ -21,7 +21,7 @@ SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
 def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2,
              run_id: str = None, database_by_client_id: dict = None, max_entities: int = None,
-             approved_mapping_digest_by_client_id: dict = None) -> dict:
+             approved_mapping_digest_by_client_id: dict = None, capacity_mode: str = "manual") -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -61,6 +61,9 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     # in the job; the receiving daemon picks its own entry by CLIENT_ID.
     if approved_mapping_digest_by_client_id:
         job["approved_mapping_digest_by_client_id"] = approved_mapping_digest_by_client_id
+    # count-disclosure fix: see train.py's matching comment.
+    if capacity_mode != "manual":
+        job["capacity_mode"] = capacity_mode
     publish_job(JOBS_DIR, job)
     info(f"Vanilla train: submitted job {job_id} ({action}, method={matching_method}, "
          f"fuzzy_threshold={fuzzy_threshold}), waiting for host daemon...")
@@ -72,7 +75,7 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
 
 def vanilla_train_worker_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
                     run_id: str = None, database_by_client_id: dict = None, max_entities: int = None,
-                    approved_mapping_digest_by_client_id: dict = None):
+                    approved_mapping_digest_by_client_id: dict = None, capacity_mode: str = "manual"):
     """NOT PRIVATE - deliberately insecure baseline for comparison
     against vantage6-vfl's real (Rep3 MPC) aggVFLc training only.
 
@@ -89,12 +92,13 @@ def vanilla_train_worker_run(matching_method: str = "exact", fuzzy_threshold: in
     """
     return _run_job("vanilla_train_worker_run", matching_method, fuzzy_threshold, run_id,
                      database_by_client_id=database_by_client_id, max_entities=max_entities,
-                     approved_mapping_digest_by_client_id=approved_mapping_digest_by_client_id)
+                     approved_mapping_digest_by_client_id=approved_mapping_digest_by_client_id,
+                     capacity_mode=capacity_mode)
 
 
 def vanilla_train_coordinator_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
                     run_id: str = None, database_by_client_id: dict = None, max_entities: int = None,
-                    approved_mapping_digest_by_client_id: dict = None):
+                    approved_mapping_digest_by_client_id: dict = None, capacity_mode: str = "manual"):
     """NOT PRIVATE - deliberately insecure baseline for comparison
     against vantage6-vfl's real (Rep3 MPC) aggVFLc training only.
 
@@ -109,4 +113,5 @@ def vanilla_train_coordinator_run(matching_method: str = "exact", fuzzy_threshol
     """
     return _run_job("vanilla_train_coordinator_run", matching_method, fuzzy_threshold, run_id,
                      database_by_client_id=database_by_client_id, max_entities=max_entities,
-                     approved_mapping_digest_by_client_id=approved_mapping_digest_by_client_id)
+                     approved_mapping_digest_by_client_id=approved_mapping_digest_by_client_id,
+                     capacity_mode=capacity_mode)

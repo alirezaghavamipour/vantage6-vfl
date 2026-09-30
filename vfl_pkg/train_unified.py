@@ -725,9 +725,22 @@ def central_train(
         # in vantage6 regardless of what central_train() itself returns -
         # without this, debug=False here would still leave raw
         # predictions sitting in every client subtask's own result.
+        #
+        # count-disclosure fix: capacity_mode is forwarded to the training
+        # dispatch itself (not just _collective_fuzzy_experimental_check's
+        # own prealignment PSI call below) - training never needed this
+        # before (it reads the artifact _collective_fuzzy_experimental_check
+        # already wrote rather than re-running PSI, so no port/program
+        # selection depends on it), but the daemon now uses it to decide
+        # whether an alignment-artifact validation failure's error message
+        # may include this party's raw local_count - see
+        # mpc_daemon_client_v2.py's _validate_artifact_schema(redact_counts=).
+        # Without this, automatic mode's training-path errors would keep
+        # disclosing local_count even though the PSI-path ones no longer do.
         client_kwargs = dict(kwargs, algorithm=algorithm, max_entities=max_entities, debug=debug,
                               database_by_client_id=database_by_client_id,
-                              expected_n_features_by_client_id=expected_n_features_by_client_id)
+                              expected_n_features_by_client_id=expected_n_features_by_client_id,
+                              capacity_mode="dynamic" if is_automatic_capacity else "manual")
         if n_samples is not None:
             client_kwargs["n_samples_bound"] = n_samples
     else:
@@ -744,7 +757,8 @@ def central_train(
         # expected_n_features_by_client_id here: that field feeds the
         # secure-mode-only schema-discovery-staleness check; non_secure
         # has no compiled circuit for it to protect.
-        client_kwargs = dict(kwargs, max_entities=max_entities, database_by_client_id=database_by_client_id)
+        client_kwargs = dict(kwargs, max_entities=max_entities, database_by_client_id=database_by_client_id,
+                              capacity_mode="dynamic" if is_automatic_capacity else "manual")
 
     # F02 fix (fuzzy_experimental only): collective pre-training validity
     # check, run to completion before ANY training or PSI-computing-party
