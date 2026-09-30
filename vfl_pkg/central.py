@@ -146,29 +146,14 @@ def central(
         and psi_capacity == _psi_capacity.AUTOMATIC_CAPACITY_SENTINEL
     )
 
-    # Schema discovery: ask each party its own raw row count (read
-    # straight from its CSV) before dispatching PSI, so the computing
-    # parties can compile a correctly-shaped PSI circuit for this run's
-    # actual data instead of a fixed assumed bound. This is safe to
-    # auto-compute (unlike training's row bound): PSI's own bound only
-    # needs to cover raw candidate counts, which don't require running
-    # PSI first to learn (no chicken-and-egg problem). Rounded up to the
-    # next multiple of 50 with at least 50 rows of headroom, so the
-    # bound never lands exactly on any one party's true count. Skipped
-    # entirely for automatic mode below - private row-count discovery
-    # replaces it.
-    schema_tasks = {
-        org_id: client.task.create(
-            input_={"method": "report_schema_run", "kwargs": {
-                "run_id": run_id, "include_row_count": not is_automatic_capacity,
-            }},
-            organizations=[org_id], name=f"schema-psi-{org_id}",
-        )["id"]
-        for org_id in client_org_ids
-    }
-    schema_results = {org_id: client.wait_for_results(task_id=task_id)[0]
-                       for org_id, task_id in schema_tasks.items()}
-
+    # Bug #3 fix: automatic mode's capacity negotiation (which retains
+    # each party's dataset snapshot as a side effect - see
+    # retain_dataset_snapshot in mpc_daemon_client_v2.py) now runs BEFORE
+    # schema discovery, so schema discovery can read from that SAME
+    # already-retained snapshot below instead of doing its own separate,
+    # potentially-diverged fresh CSV read. Manual mode is unaffected -
+    # schema discovery still runs first, exactly as before, since manual
+    # mode has no snapshot at all.
     if is_automatic_capacity:
         negotiation_ok, max_entities, negotiation_detail = _psi_capacity.negotiate_automatic_capacity(
             client, client_org_ids, agg_org_ids, run_id, fuzzy_threshold,
@@ -198,7 +183,33 @@ def central(
             }
         kwargs["capacity_mode"] = "dynamic"
         info(f"Central: automatic capacity negotiated max_entities={max_entities}")
-    else:
+
+    # Schema discovery: ask each party its own raw row count (read
+    # straight from its CSV) before dispatching PSI, so the computing
+    # parties can compile a correctly-shaped PSI circuit for this run's
+    # actual data instead of a fixed assumed bound. This is safe to
+    # auto-compute (unlike training's row bound): PSI's own bound only
+    # needs to cover raw candidate counts, which don't require running
+    # PSI first to learn (no chicken-and-egg problem). Rounded up to the
+    # next multiple of 50 with at least 50 rows of headroom, so the
+    # bound never lands exactly on any one party's true count.
+    # capacity_mode="dynamic" (bug #3 fix, automatic mode only): reads
+    # from the snapshot negotiation just retained above, instead of a
+    # fresh CSV read.
+    schema_tasks = {
+        org_id: client.task.create(
+            input_={"method": "report_schema_run", "kwargs": {
+                "run_id": run_id, "include_row_count": not is_automatic_capacity,
+                **({"capacity_mode": "dynamic"} if is_automatic_capacity else {}),
+            }},
+            organizations=[org_id], name=f"schema-psi-{org_id}",
+        )["id"]
+        for org_id in client_org_ids
+    }
+    schema_results = {org_id: client.wait_for_results(task_id=task_id)[0]
+                       for org_id, task_id in schema_tasks.items()}
+
+    if not is_automatic_capacity:
         raw_row_counts = [schema_results[org_id]["n_rows"] for org_id in client_org_ids]
         max_entities = ((max(raw_row_counts) // 50) + 2) * 50
         if matching_method == "fuzzy_experimental":

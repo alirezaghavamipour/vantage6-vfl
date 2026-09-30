@@ -548,25 +548,86 @@ def central_train(
         and psi_capacity == _psi_capacity.AUTOMATIC_CAPACITY_SENTINEL
     )
 
+    # Bug #3 fix: automatic mode's capacity negotiation (which retains
+    # each party's dataset snapshot as a side effect - see
+    # retain_dataset_snapshot in mpc_daemon_client_v2.py) now runs BEFORE
+    # schema discovery, so schema discovery (dispatched just below) can
+    # read from that SAME already-retained snapshot instead of its own
+    # separate, potentially-diverged fresh CSV read. Manual mode is
+    # unaffected - schema discovery still runs first there (negotiation
+    # is skipped entirely for manual mode), exactly as before. One real
+    # tradeoff: the org-id/client_id role-mismatch check just below
+    # (which depends on schema_results) now runs AFTER a full automatic-
+    # mode negotiation instead of before it - a role-configuration error
+    # is still caught and rejected correctly, just one step later than
+    # in manual mode, since there's no cheaper way to learn client_id
+    # before schema discovery itself runs.
+    if is_automatic_capacity:
+        # Row counts were never learned in the clear (include_row_count
+        # will be False below) - max_entities instead comes from private
+        # row-count discovery + the build-agreement barrier. Any
+        # failure here is a coordinated reject: no PSI or training task
+        # is dispatched to any party, exactly like a failed
+        # _collective_fuzzy_experimental_check below.
+        negotiation_ok, max_entities, negotiation_detail = _psi_capacity.negotiate_automatic_capacity(
+            client, client_org_ids, agg_org_ids, run_id, fuzzy_threshold,
+            database_by_client_id=database_by_client_id,
+        )
+        info(f"Central (train {architecture}, {privacy_mode}): automatic capacity negotiation "
+             f"{'PASSED' if negotiation_ok else 'FAILED'} - {negotiation_detail}")
+        if not negotiation_ok:
+            message = (
+                "Automatic capacity negotiation failed - no PSI or training task was "
+                "dispatched to any party, and no model result was produced. See "
+                "'negotiation_detail' for the non-PII diagnostic (no individual row "
+                "counts are ever included)."
+            )
+            return {
+                "summary": [
+                    {"metric": "run_id", "value": run_id},
+                    {"metric": "overall_status", "value": "capacity_negotiation_error"},
+                    {"metric": "architecture", "value": architecture},
+                    {"metric": "privacy_mode", "value": privacy_mode},
+                    {"metric": "matching_method", "value": matching_method},
+                    {"metric": "message", "value": message},
+                ],
+                "run_id": run_id,
+                "overall_status": "capacity_negotiation_error",
+                "architecture": architecture,
+                "privacy_mode": privacy_mode,
+                "matching_method": matching_method,
+                "fuzzy_threshold": None,
+                "aligned_count": None,
+                "message": message,
+                "negotiation_detail": negotiation_detail,
+            }
+        raw_row_counts = None  # never learned in this mode - see include_row_count below
+        info(f"Central (train {architecture}, {privacy_mode}): automatic capacity negotiated "
+             f"max_entities={max_entities}")
+
+    # capacity_mode="dynamic" (bug #3 fix, automatic mode only): reads
+    # from the snapshot negotiation just retained above, instead of a
+    # fresh CSV read.
+    _schema_capacity_kwargs = {"capacity_mode": "dynamic"} if is_automatic_capacity else {}
     schema_tasks = {
         fp1_org: client.task.create(
             input_={"method": "report_schema_run", "kwargs": {
                 "database": database_by_client_id[0], "run_id": run_id,
-                "include_row_count": not is_automatic_capacity,
+                "include_row_count": not is_automatic_capacity, **_schema_capacity_kwargs,
             }},
             organizations=[fp1_org], name=f"schema-{architecture}-{fp1_org}",
         )["id"],
         fp2_org: client.task.create(
             input_={"method": "report_schema_run", "kwargs": {
                 "database": database_by_client_id[1], "run_id": run_id,
-                "include_row_count": not is_automatic_capacity,
+                "include_row_count": not is_automatic_capacity, **_schema_capacity_kwargs,
             }},
             organizations=[fp2_org], name=f"schema-{architecture}-{fp2_org}",
         )["id"],
         label_org_id: client.task.create(
             input_={"method": "report_schema_run", "kwargs": {
                 "database": database_by_client_id[2], "run_id": run_id,
-                "include_row_count": not is_automatic_capacity,
+                "include_row_count": not is_automatic_capacity, **_schema_capacity_kwargs,
             }},
             organizations=[label_org_id], name=f"schema-{architecture}-{label_org_id}",
         )["id"],
@@ -612,47 +673,11 @@ def central_train(
     # matched count, raw counts don't need PSI to run first). Rounded up
     # to the next multiple of 50 with at least 50 rows of headroom, so
     # the bound never lands exactly on any one party's true count.
-    if is_automatic_capacity:
-        # Row counts were never learned in the clear (include_row_count
-        # was False above) - max_entities instead comes from private
-        # row-count discovery + the build-agreement barrier. Any
-        # failure here is a coordinated reject: no PSI or training task
-        # is dispatched to any party, exactly like a failed
-        # _collective_fuzzy_experimental_check below.
-        negotiation_ok, max_entities, negotiation_detail = _psi_capacity.negotiate_automatic_capacity(
-            client, client_org_ids, agg_org_ids, run_id, fuzzy_threshold,
-            database_by_client_id=database_by_client_id,
-        )
-        info(f"Central (train {architecture}, {privacy_mode}): automatic capacity negotiation "
-             f"{'PASSED' if negotiation_ok else 'FAILED'} - {negotiation_detail}")
-        if not negotiation_ok:
-            message = (
-                "Automatic capacity negotiation failed - no PSI or training task was "
-                "dispatched to any party, and no model result was produced. See "
-                "'negotiation_detail' for the non-PII diagnostic (no individual row "
-                "counts are ever included)."
-            )
-            return {
-                "summary": [
-                    {"metric": "run_id", "value": run_id},
-                    {"metric": "overall_status", "value": "capacity_negotiation_error"},
-                    {"metric": "architecture", "value": architecture},
-                    {"metric": "privacy_mode", "value": privacy_mode},
-                    {"metric": "matching_method", "value": matching_method},
-                    {"metric": "message", "value": message},
-                ],
-                "run_id": run_id,
-                "overall_status": "capacity_negotiation_error",
-                "architecture": architecture,
-                "privacy_mode": privacy_mode,
-                "matching_method": matching_method,
-                "fuzzy_threshold": None,
-                "aligned_count": None,
-                "message": message,
-                "negotiation_detail": negotiation_detail,
-            }
-        raw_row_counts = None  # never learned in this mode - see include_row_count above
-    else:
+    #
+    # Bug #3 fix: automatic mode's own max_entities was already resolved
+    # (and logged) by the negotiation block above, which now runs BEFORE
+    # schema discovery - only the manual-mode resolution happens here.
+    if not is_automatic_capacity:
         raw_row_counts = [schema_results[fp1_org]["n_rows"], schema_results[fp2_org]["n_rows"],
                            schema_results[label_org_id]["n_rows"]]
         max_entities = ((max(raw_row_counts) // 50) + 2) * 50
@@ -671,10 +696,9 @@ def central_train(
             # here instead rejected datasets that actually fit (e.g. 50
             # rows needing max_entities=150, rejected at capacity=100).
             max_entities = _psi_capacity.resolve_capacity(psi_capacity, max(raw_row_counts), raw_row_counts)
+        info(f"Central (train {architecture}, {privacy_mode}): discovered raw row counts "
+             f"{raw_row_counts}, using PSI bound max_entities={max_entities}")
     agg_kwargs["max_entities"] = max_entities
-    info(f"Central (train {architecture}, {privacy_mode}): "
-         + (f"automatic capacity negotiated max_entities={max_entities}" if is_automatic_capacity
-            else f"discovered raw row counts {raw_row_counts}, using PSI bound max_entities={max_entities}"))
 
     if privacy_mode == "secure":
         n_feat_a = schema_results[fp1_org]["n_features"]

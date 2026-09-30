@@ -15,7 +15,8 @@ RESULTS_DIR = os.path.join(BRIDGE, "results")
 TIMEOUT = 60
 
 
-def report_schema_run(database: str = None, run_id: str = None, include_row_count: bool = True):
+def report_schema_run(database: str = None, run_id: str = None, include_row_count: bool = True,
+                       capacity_mode: str = "manual"):
     """Feature/label party: report this party's local row count and
     feature-column count for the given database, read directly from its
     own CSV (every column except full_name/target) - lets central_train
@@ -35,6 +36,14 @@ def report_schema_run(database: str = None, run_id: str = None, include_row_coun
     through the private row-count-discovery MPC circuit instead. This
     party's n_rows is then omitted from the result entirely (not
     zeroed/redacted-in-place); n_features/client_id are unaffected.
+    capacity_mode: bug #3 fix - "dynamic" (automatic capacity mode)
+    makes this read the run's already-retained dataset snapshot instead
+    of a fresh CSV read, so the reported feature count matches the exact
+    rows counting/PSI/training all use for this run_id. Requires private
+    row-count discovery (and therefore snapshot retention) to have
+    already run for this run_id - see train_unified.py's/central.py's
+    own dispatch ordering for automatic mode, which negotiates capacity
+    BEFORE dispatching schema discovery for this reason.
     """
     job_id = str(uuid.uuid4())
     job = {"job_id": job_id, "action": "report_schema"}
@@ -44,6 +53,9 @@ def report_schema_run(database: str = None, run_id: str = None, include_row_coun
         job["run_id"] = run_id
     if not include_row_count:
         job["include_row_count"] = False
+    # count-disclosure fix's own convention (see psi.py's _run_job).
+    if capacity_mode != "manual":
+        job["capacity_mode"] = capacity_mode
     os.makedirs(JOBS_DIR, exist_ok=True)
     with open(os.path.join(JOBS_DIR, job_id + ".json"), "w") as f:
         json.dump(job, f)
