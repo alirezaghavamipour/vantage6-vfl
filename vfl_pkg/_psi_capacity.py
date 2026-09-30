@@ -71,20 +71,31 @@ AUTOMATIC_CAPACITY_SENTINEL = "auto"
 DYNAMIC_MAX_CAPACITY = 1000
 
 
-def resolve_capacity(psi_capacity, computed_max_entities, raw_row_counts):
+def resolve_capacity(psi_capacity, actual_max_rows, raw_row_counts):
     """Resolves the actual PSI bound to use for a fuzzy_experimental
     run: the caller's explicit psi_capacity selection if given (must be
     one of SUPPORTED_FUZZY_EXPERIMENTAL_CAPACITIES), else the default
-    capacity - then checks the auto-computed bound (from discovered raw
-    row counts) actually fits inside it. Raises ValueError (never
-    silently clamps or truncates) if the selected capacity is
-    unsupported or too small for the real data - the SAME rejection
-    shape ensure_psi_compiled uses on the aggregator side, just
-    surfaced here first. Note: schema-discovery tasks (report_schema_run)
-    have ALREADY been dispatched to every client by the time this runs
-    (raw_row_counts comes from their results) - this rejects before any
-    PSI/training MPC execution task is launched, not before any task at
-    all."""
+    capacity - then checks the real max raw row count actually fits
+    inside it. Raises ValueError (never silently clamps or truncates)
+    if the selected capacity is unsupported or too small for the real
+    data - the SAME rejection shape ensure_psi_compiled uses on the
+    aggregator side, just surfaced here first. Note: schema-discovery
+    tasks (report_schema_run) have ALREADY been dispatched to every
+    client by the time this runs (raw_row_counts comes from their
+    results) - this rejects before any PSI/training MPC execution task
+    is launched, not before any task at all.
+
+    Bug #2 fix: actual_max_rows must be max(raw_row_counts) - the real,
+    unpadded maximum - never a headroom-inflated bound like
+    ((max(raw_row_counts) // 50) + 2) * 50. That padding exists for
+    OTHER callers (e.g. exact match's on-demand compile sizing); a
+    precompiled manual capacity (100/350/700/1000) is already the final,
+    fixed bound and needs no extra padding to "fit inside" - comparing a
+    padded value against it previously rejected real datasets that
+    actually fit (e.g. 50 rows, padded to 150, wrongly rejected at
+    capacity=100). The parameter name matches this contract; a caller
+    passing anything else defeats the point the same way a caller
+    silently defaulting would."""
     selected = psi_capacity if psi_capacity is not None else DEFAULT_FUZZY_EXPERIMENTAL_CAPACITY
     if selected not in SUPPORTED_FUZZY_EXPERIMENTAL_CAPACITIES:
         raise ValueError(
@@ -93,10 +104,10 @@ def resolve_capacity(psi_capacity, computed_max_entities, raw_row_counts):
             f"{sorted(SUPPORTED_FUZZY_EXPERIMENTAL_CAPACITIES)}) - a different "
             f"capacity needs its own compiled-and-validated circuit first"
         )
-    if computed_max_entities > selected:
+    if actual_max_rows > selected:
         raise ValueError(
             f"fuzzy_experimental's raw dataset needs max_entities="
-            f"{computed_max_entities} (from discovered row counts "
+            f"{actual_max_rows} (from discovered row counts "
             f"{raw_row_counts}), but the selected capacity is {selected} - "
             f"choose a larger precompiled capacity or reduce the dataset"
         )

@@ -207,7 +207,19 @@ def central(
             # supported/validated set, and rejects clearly - before any
             # task is dispatched - if the real dataset's raw row count
             # exceeds it. See _psi_capacity.py.
-            max_entities = _psi_capacity.resolve_capacity(psi_capacity, max_entities, raw_row_counts)
+            #
+            # Bug #2 fix: the precompiled manual menu (100/350/700/1000)
+            # IS the real, final bound - it needs no extra padding above
+            # the actual max raw row count, unlike the headroom-inflated
+            # max_entities computed just above (that padding exists for
+            # OTHER callers - exact match's on-demand compile size - not
+            # for checking fit against an already-fixed precompiled
+            # capacity). Passing the padded value here instead of the
+            # real max(raw_row_counts) made a 50-row dataset need
+            # max_entities=150 and get rejected at capacity=100, though
+            # it fits with room to spare. resolve_capacity's own bound
+            # check now gets the actual max directly.
+            max_entities = _psi_capacity.resolve_capacity(psi_capacity, max(raw_row_counts), raw_row_counts)
         info(f"Central: discovered raw row counts {raw_row_counts}, using PSI bound max_entities={max_entities}")
     kwargs["max_entities"] = max_entities
 

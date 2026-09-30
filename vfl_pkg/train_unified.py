@@ -664,7 +664,13 @@ def central_train(
             # exceeds it. ensure_psi_compiled on the aggregator side would
             # also reject a mismatched bound, but failing here is clearer
             # and avoids dispatching any task first. See _psi_capacity.py.
-            max_entities = _psi_capacity.resolve_capacity(psi_capacity, max_entities, raw_row_counts)
+            #
+            # Bug #2 fix: see central.py's matching comment - the
+            # precompiled manual menu needs no headroom padding above the
+            # actual max raw row count; passing the padded max_entities
+            # here instead rejected datasets that actually fit (e.g. 50
+            # rows needing max_entities=150, rejected at capacity=100).
+            max_entities = _psi_capacity.resolve_capacity(psi_capacity, max(raw_row_counts), raw_row_counts)
     agg_kwargs["max_entities"] = max_entities
     info(f"Central (train {architecture}, {privacy_mode}): "
          + (f"automatic capacity negotiated max_entities={max_entities}" if is_automatic_capacity
