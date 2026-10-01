@@ -21,16 +21,15 @@ def central(
     psi_capacity: int = None,
     psi_capacity_mode: str = "manual",
     debug: bool = False,
-    dataset: str = datasets.NODE_DEFAULT,
+    dataset: str = datasets.DEFAULT_DATASET,
 ):
     """
     Orchestrate a full Rep3 PSI run in one submission: dispatch
     psi_client_share to each feature/label party and psi_party_run to
     each computing party, then collect and summarize the result.
 
-    dataset: 'node_default' (default) aligns each node's heart_vfl
-    database, as before. A benchmark id ('bcw_exact', ...) aligns
-    '<id>_labelonly' on every party - identity columns are identical in a
+    dataset: a benchmark id ('bcw_exact' by default, ...). Every party
+    aligns '<id>_labelonly' - identity columns are identical in a
     benchmark's two layouts, so this is the same alignment training uses.
     Schema discovery, automatic-mode snapshots and PSI all read that label.
 
@@ -133,7 +132,7 @@ def central(
         psi_capacity = _psi_capacity.AUTOMATIC_CAPACITY_SENTINEL
     datasets.validate_psi_selection(dataset, matching_method, psi_capacity)
     psi_label = datasets.psi_database_label(dataset)
-    database_by_client_id = {0: psi_label, 1: psi_label, 2: psi_label} if psi_label else None
+    database_by_client_id = {0: psi_label, 1: psi_label, 2: psi_label}
 
     # Ties every job this run dispatches - across all client and
     # aggregator hosts - back to this one orchestrated run, so anyone
@@ -215,7 +214,7 @@ def central(
             input_={"method": "report_schema_run", "kwargs": {
                 "run_id": run_id, "include_row_count": not is_automatic_capacity,
                 **({"capacity_mode": "dynamic"} if is_automatic_capacity else {}),
-                **({"database": psi_label} if psi_label else {}),
+                "database": psi_label,
             }},
             organizations=[org_id], name=f"schema-psi-{org_id}",
         )["id"]
@@ -256,9 +255,7 @@ def central(
     # debug kwarg (aggregators never see matched names either way), so
     # this only applies to the client-share kwargs, not the shared dict
     # used for the aggregator loop below.
-    client_kwargs = dict(kwargs, debug=debug)
-    if database_by_client_id:
-        client_kwargs["database_by_client_id"] = database_by_client_id
+    client_kwargs = dict(kwargs, debug=debug, database_by_client_id=database_by_client_id)
 
     tasks = {}
     for org_id in client_org_ids:

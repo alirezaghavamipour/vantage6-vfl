@@ -256,18 +256,17 @@ def central_train(
     n_samples: int = None,
     algorithm: str = "logistic",
     debug: bool = False,
-    dataset: str = datasets.NODE_DEFAULT,
+    dataset: str = datasets.DEFAULT_DATASET,
 ):
     """
     Train a vertical federated learning model - pick which of the 4
     architectures and whether to run it privately (Rep3 MPC) or as a
     deliberately insecure plaintext baseline for comparison.
 
-    dataset: 'node_default' (default) reads each node's heart_vfl /
-    heart_vfl_aggvfl labels, as before. A benchmark id ('bcw_exact',
-    'diabetes_fuzzyk2', ...) reads '<id>_labelonly' for aggVFLc/splitVFLc
-    or '<id>_distributed' for aggVFL/splitVFL on every party, for schema
-    discovery, snapshots, PSI and training alike. The selection is checked
+    dataset: a benchmark id ('bcw_exact' by default, 'diabetes_fuzzyk2',
+    ...). Every party reads '<id>_labelonly' for aggVFLc/splitVFLc or
+    '<id>_distributed' for aggVFL/splitVFL, for schema discovery,
+    snapshots, PSI and training alike. The selection is checked
     against algorithm and PSI capacity before any task is dispatched, and
     in secure mode n_samples defaults to the benchmark's rows per party.
 
