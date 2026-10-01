@@ -52,11 +52,29 @@ def psi_database_label(dataset):
     return f"{dataset}_labelonly"
 
 
+def required_capacity(dataset):
+    """Smallest precompiled fuzzy PSI capacity that fits the dataset's rows
+    per party (bcw 100, diabetes 350, credit 1000). A larger capacity
+    accepts the same matches but costs more MPC work, so this is the one to
+    use; the UI therefore no longer asks for a capacity."""
+    rows = validate_dataset(dataset)["rows_per_party"]
+    return min(c for c in _psi_capacity.SUPPORTED_FUZZY_EXPERIMENTAL_CAPACITIES if c >= rows)
+
+
+def resolve_psi_capacity(dataset, matching_method, psi_capacity):
+    """psi_capacity=None in manual fuzzy mode means 'use the dataset's
+    required capacity'. An explicit value (direct calls only) is kept and
+    checked by validate_psi_selection."""
+    if matching_method == "fuzzy_experimental" and psi_capacity is None:
+        return required_capacity(dataset)
+    return psi_capacity
+
+
 def validate_psi_selection(dataset, matching_method, psi_capacity):
-    """Checks that the dataset fits the selected manual fuzzy PSI capacity."""
+    """Checks that the dataset fits an explicitly selected manual fuzzy PSI capacity."""
     rows = validate_dataset(dataset)["rows_per_party"]
     if matching_method == "fuzzy_experimental" and psi_capacity != _psi_capacity.AUTOMATIC_CAPACITY_SENTINEL:
-        selected = psi_capacity if psi_capacity is not None else _psi_capacity.DEFAULT_FUZZY_EXPERIMENTAL_CAPACITY
+        selected = psi_capacity if psi_capacity is not None else required_capacity(dataset)
         if isinstance(selected, int) and not isinstance(selected, bool) and selected < rows:
             fitting = [c for c in _psi_capacity.SUPPORTED_FUZZY_EXPERIMENTAL_CAPACITIES if c >= rows]
             raise ValueError(

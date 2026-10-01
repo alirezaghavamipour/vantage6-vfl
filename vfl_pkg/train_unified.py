@@ -324,7 +324,9 @@ def central_train(
     psi_capacity (matching_method="fuzzy_experimental",
     psi_capacity_mode="manual" only): which precompiled PSI capacity to
     use - 100, 350, 700, or 1000 raw candidate rows per party. None
-    uses the default (350). Schema discovery (report_schema_run) is
+    (always the case from the UI) uses the selected dataset's required
+    capacity - bcw 100, diabetes 350, credit 1000; an explicit value is
+    for direct calls only. Schema discovery (report_schema_run) is
     dispatched to every client first, to learn the real raw row counts
     in the clear; rejection then happens clearly, before any PSI or
     training execution task is launched, if those counts exceed the
@@ -432,6 +434,7 @@ def central_train(
         # direct caller passing psi_capacity="auto" without setting
         # this new argument keeps working exactly as already tested.
         psi_capacity = _psi_capacity.AUTOMATIC_CAPACITY_SENTINEL
+    psi_capacity = datasets.resolve_psi_capacity(dataset, matching_method, psi_capacity)
     # F02: production fuzzy training is PAUSED. Diagnosed live
     # (2026-09-27): the fuzzy circuit can bind more than one of a
     # party's own local rows to the same alignment key, and different

@@ -84,7 +84,9 @@ def central(
     psi_capacity (matching_method="fuzzy_experimental",
     psi_capacity_mode="manual" only): which precompiled PSI capacity to
     use - 100, 350, 700, or 1000 raw candidate rows per party. None
-    uses the default (350). Schema discovery (report_schema_run) is
+    (always the case from the UI) uses the selected dataset's required
+    capacity - bcw 100, diabetes 350, credit 1000; an explicit value is
+    for direct calls only. Schema discovery (report_schema_run) is
     dispatched to every client first, to learn the real raw row counts
     in the clear; rejection then happens clearly, before any PSI
     execution task is launched, if those counts exceed the selected
@@ -130,6 +132,7 @@ def central(
         # direct caller passing psi_capacity="auto" without setting
         # this new argument keeps working exactly as already tested.
         psi_capacity = _psi_capacity.AUTOMATIC_CAPACITY_SENTINEL
+    psi_capacity = datasets.resolve_psi_capacity(dataset, matching_method, psi_capacity)
     datasets.validate_psi_selection(dataset, matching_method, psi_capacity)
     psi_label = datasets.psi_database_label(dataset)
     database_by_client_id = {0: psi_label, 1: psi_label, 2: psi_label}
