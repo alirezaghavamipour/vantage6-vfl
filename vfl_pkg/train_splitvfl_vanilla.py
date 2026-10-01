@@ -16,7 +16,8 @@ SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
 
 def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int = 2,
              run_id: str = None, database_by_client_id: dict = None, max_entities: int = None,
-             approved_mapping_digest_by_client_id: dict = None, capacity_mode: str = "manual") -> dict:
+             approved_mapping_digest_by_client_id: dict = None, capacity_mode: str = "manual",
+             algorithm: str = "logistic") -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -52,6 +53,9 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     # count-disclosure fix: see train.py's matching comment.
     if capacity_mode != "manual":
         job["capacity_mode"] = capacity_mode
+    # algorithm: see train_vanilla.py's matching comment.
+    if algorithm != "logistic":
+        job["algorithm"] = algorithm
     publish_job(JOBS_DIR, job)
     info(f"Vanilla splitVFL train: submitted job {job_id} ({action}, method={matching_method}, "
          f"fuzzy_threshold={fuzzy_threshold}), waiting for host daemon...")
@@ -63,7 +67,8 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
 
 def vanilla_train_splitvfl_bottom_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
                     run_id: str = None, database_by_client_id: dict = None, max_entities: int = None,
-                    approved_mapping_digest_by_client_id: dict = None, capacity_mode: str = "manual"):
+                    approved_mapping_digest_by_client_id: dict = None, capacity_mode: str = "manual",
+                    algorithm: str = "logistic"):
     """NOT PRIVATE - deliberately insecure plaintext baseline that is a
     true unencrypted mirror of the secure splitVFL circuit's model (one
     joint Dense+ReLU hidden layer over every party's concatenated
@@ -83,12 +88,13 @@ def vanilla_train_splitvfl_bottom_run(matching_method: str = "exact", fuzzy_thre
     return _run_job("vanilla_train_splitvfl_bottom_run", matching_method, fuzzy_threshold, run_id,
                      database_by_client_id=database_by_client_id, max_entities=max_entities,
                      approved_mapping_digest_by_client_id=approved_mapping_digest_by_client_id,
-                     capacity_mode=capacity_mode)
+                     capacity_mode=capacity_mode, algorithm=algorithm)
 
 
 def vanilla_train_splitvfl_top_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
                     run_id: str = None, database_by_client_id: dict = None, max_entities: int = None,
-                    approved_mapping_digest_by_client_id: dict = None, capacity_mode: str = "manual"):
+                    approved_mapping_digest_by_client_id: dict = None, capacity_mode: str = "manual",
+                    algorithm: str = "logistic"):
     """NOT PRIVATE - deliberately insecure plaintext baseline that is a
     true unencrypted mirror of the secure splitVFL circuit's model.
 
@@ -108,4 +114,4 @@ def vanilla_train_splitvfl_top_run(matching_method: str = "exact", fuzzy_thresho
     return _run_job("vanilla_train_splitvfl_top_run", matching_method, fuzzy_threshold, run_id,
                      database_by_client_id=database_by_client_id, max_entities=max_entities,
                      approved_mapping_digest_by_client_id=approved_mapping_digest_by_client_id,
-                     capacity_mode=capacity_mode)
+                     capacity_mode=capacity_mode, algorithm=algorithm)

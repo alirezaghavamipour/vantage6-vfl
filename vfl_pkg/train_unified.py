@@ -460,11 +460,6 @@ def central_train(
             f"algorithm={algorithm!r} is not supported "
             f"(choose 'logistic' or 'linear')"
         )
-    if algorithm == "linear" and privacy_mode == "non_secure":
-        raise ValueError(
-            "algorithm='linear' is only implemented for privacy_mode='secure' "
-            "so far - the non_secure vanilla baseline is still logistic-only"
-        )
     # n_samples ends up embedded directly in generated .mpc circuit
     # source text on the aggregator (see circuit_generator.py's
     # _validate_int, which is the actual enforcement point - this check
@@ -787,7 +782,11 @@ def central_train(
         # expected_n_features_by_client_id here: that field feeds the
         # secure-mode-only schema-discovery-staleness check; non_secure
         # has no compiled circuit for it to protect.
-        client_kwargs = dict(kwargs, max_entities=max_entities, database_by_client_id=database_by_client_id,
+        # algorithm='linear' now implemented for non_secure too (was
+        # previously rejected before reaching here) - forwarded the same
+        # way the secure branch above already does, so the vanilla
+        # daemon functions know which label encoding/activation to use.
+        client_kwargs = dict(kwargs, algorithm=algorithm, max_entities=max_entities, database_by_client_id=database_by_client_id,
                               capacity_mode="dynamic" if is_automatic_capacity else "manual")
 
     # F02 fix (fuzzy_experimental only): collective pre-training validity
