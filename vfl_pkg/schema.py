@@ -25,10 +25,10 @@ def report_schema_run(database: str = None, run_id: str = None, include_row_coun
     fixed dataset shape. The aggregators use this to decide whether
     their compiled training circuit needs regenerating for this run.
 
-    database: which of this party's registered databases to report on -
-    "heart_vfl" (the default) or "heart_vfl_aggvfl" for architectures
-    where the label party also contributes features. Set by
-    central_train per party's role, not meant to be chosen by hand.
+    database: which of this party's registered csv databases to report
+    on - None means "heart_vfl". Resolved by central_train/central from
+    the selected dataset and architecture (see datasets.py), not meant to
+    be chosen by hand.
     run_id: shared identifier set by central_train to correlate this job
     with the other jobs dispatched by the same orchestrated run.
     include_row_count: Phase 2 Stage 3 - False for automatic capacity

@@ -5,6 +5,7 @@ from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.util import info
 
 from . import _psi_capacity
+from . import datasets
 
 
 SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
@@ -255,11 +256,20 @@ def central_train(
     n_samples: int = None,
     algorithm: str = "logistic",
     debug: bool = False,
+    dataset: str = datasets.NODE_DEFAULT,
 ):
     """
     Train a vertical federated learning model - pick which of the 4
     architectures and whether to run it privately (Rep3 MPC) or as a
     deliberately insecure plaintext baseline for comparison.
+
+    dataset: 'node_default' (default) reads each node's heart_vfl /
+    heart_vfl_aggvfl labels, as before. A benchmark id ('bcw_exact',
+    'diabetes_fuzzyk2', ...) reads '<id>_labelonly' for aggVFLc/splitVFLc
+    or '<id>_distributed' for aggVFL/splitVFL on every party, for schema
+    discovery, snapshots, PSI and training alike. The selection is checked
+    against algorithm and PSI capacity before any task is dispatched, and
+    in secure mode n_samples defaults to the benchmark's rows per party.
 
     architecture:
       - 'aggVFLc': fixed-aggregation logistic regression, the label
@@ -362,7 +372,7 @@ def central_train(
     feature counts below) without needing PSI to run first the way the
     matched count does.
 
-    algorithm (secure mode only):
+    algorithm (both privacy modes):
       - 'logistic' (default): binary classification - the label must be
         an exact 0/1 value, predictions are 0/1 classifications.
       - 'linear': regression - the label is a continuous value,
@@ -372,8 +382,7 @@ def central_train(
         reports an identical number - only the label party's own
         result also includes 'label_max', since it's the only party
         that ever learns the label's true scale; multiply a normalized
-        prediction by label_max to get the value in real units. Not yet
-        available for privacy_mode='non_secure'.
+        prediction by label_max to get the value in real units.
 
     Predictions are revealed identically to every client party (feature
     and label parties alike), so each one can independently verify the
@@ -469,6 +478,8 @@ def central_train(
     # int without this check.
     if n_samples is not None and (isinstance(n_samples, bool) or not isinstance(n_samples, int) or n_samples < 1):
         raise ValueError(f"n_samples must be a positive int, got {n_samples!r}")
+    n_samples = datasets.validate_selection(dataset, algorithm, matching_method, psi_capacity,
+                                            privacy_mode=privacy_mode, n_samples=n_samples)
 
     spec = _ARCHITECTURES[architecture][privacy_mode]
     # Ties every job this run dispatches - across every feature, label,
@@ -497,14 +508,11 @@ def central_train(
     # columns in the "heart_vfl_aggvfl" database (aggVFL/splitVFL); the
     # plain "heart_vfl" database gives it target+full_name only, which
     # report_schema correctly reports as 0 features.
-    database_by_client_id = {
-        0: "heart_vfl",
-        1: "heart_vfl_aggvfl" if label_has_features else "heart_vfl",
-        2: "heart_vfl_aggvfl" if label_has_features else "heart_vfl",
-    }
+    database_by_client_id = datasets.database_by_client_id(dataset, label_has_features)
 
     info(f"Central (train {architecture}, {privacy_mode}): starting training run "
-         f"(run_id={run_id}, method={matching_method}, fuzzy_threshold={fuzzy_threshold}) - "
+         f"(run_id={run_id}, dataset={dataset}, databases={database_by_client_id}, "
+         f"method={matching_method}, fuzzy_threshold={fuzzy_threshold}, n_samples={n_samples}) - "
          f"features={feature_org_ids}, label={label_org_id}, aggregators={agg_org_ids}")
 
     # Schema discovery: before dispatching training, ask each party to
@@ -582,6 +590,7 @@ def central_train(
                     {"metric": "run_id", "value": run_id},
                     {"metric": "overall_status", "value": "capacity_negotiation_error"},
                     {"metric": "architecture", "value": architecture},
+                    {"metric": "dataset", "value": dataset},
                     {"metric": "privacy_mode", "value": privacy_mode},
                     {"metric": "matching_method", "value": matching_method},
                     {"metric": "message", "value": message},
@@ -589,6 +598,7 @@ def central_train(
                 "run_id": run_id,
                 "overall_status": "capacity_negotiation_error",
                 "architecture": architecture,
+                "dataset": dataset,
                 "privacy_mode": privacy_mode,
                 "matching_method": matching_method,
                 "fuzzy_threshold": fuzzy_threshold if matching_method in ("fuzzy", "fuzzy_experimental") else None,
@@ -823,6 +833,7 @@ def central_train(
                     {"metric": "run_id", "value": run_id},
                     {"metric": "overall_status", "value": "alignment_error"},
                     {"metric": "architecture", "value": architecture},
+                    {"metric": "dataset", "value": dataset},
                     {"metric": "privacy_mode", "value": privacy_mode},
                     {"metric": "matching_method", "value": matching_method},
                     {"metric": "message", "value": message},
@@ -830,6 +841,7 @@ def central_train(
                 "run_id": run_id,
                 "overall_status": "alignment_error",
                 "architecture": architecture,
+                "dataset": dataset,
                 "privacy_mode": privacy_mode,
                 "matching_method": matching_method,
                 "fuzzy_threshold": fuzzy_threshold if matching_method in ("fuzzy", "fuzzy_experimental") else None,
@@ -985,6 +997,7 @@ def central_train(
                 {"metric": "run_id", "value": run_id},
                 {"metric": "overall_status", "value": "no_matches"},
                 {"metric": "architecture", "value": architecture},
+                {"metric": "dataset", "value": dataset},
                 {"metric": "privacy_mode", "value": privacy_mode},
                 {"metric": "matching_method", "value": matching_method},
                 {"metric": "fuzzy_threshold", "value": fuzzy_threshold if matching_method in ("fuzzy", "fuzzy_experimental") else None},
@@ -994,6 +1007,7 @@ def central_train(
             "run_id": run_id,
             "overall_status": "no_matches",
             "architecture": architecture,
+            "dataset": dataset,
             "privacy_mode": privacy_mode,
             "matching_method": matching_method,
             "fuzzy_threshold": fuzzy_threshold if matching_method in ("fuzzy", "fuzzy_experimental") else None,
@@ -1057,6 +1071,7 @@ def central_train(
             {"metric": "run_id", "value": run_id},
             {"metric": "overall_status", "value": overall_status},
             {"metric": "architecture", "value": architecture},
+            {"metric": "dataset", "value": dataset},
             {"metric": "privacy_mode", "value": privacy_mode},
             {"metric": "matching_method", "value": matching_method},
             {"metric": "fuzzy_threshold", "value": fuzzy_threshold if matching_method in ("fuzzy", "fuzzy_experimental") else None},
@@ -1068,6 +1083,7 @@ def central_train(
         "run_id": run_id,
         "overall_status": overall_status,
         "architecture": architecture,
+        "dataset": dataset,
         "privacy_mode": privacy_mode,
         "matching_method": matching_method,
         "fuzzy_threshold": fuzzy_threshold if matching_method in ("fuzzy", "fuzzy_experimental") else None,

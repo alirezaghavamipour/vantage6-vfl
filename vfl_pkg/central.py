@@ -5,6 +5,7 @@ from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.util import info
 
 from . import _psi_capacity
+from . import datasets
 
 
 SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
@@ -20,11 +21,18 @@ def central(
     psi_capacity: int = None,
     psi_capacity_mode: str = "manual",
     debug: bool = False,
+    dataset: str = datasets.NODE_DEFAULT,
 ):
     """
     Orchestrate a full Rep3 PSI run in one submission: dispatch
     psi_client_share to each feature/label party and psi_party_run to
     each computing party, then collect and summarize the result.
+
+    dataset: 'node_default' (default) aligns each node's heart_vfl
+    database, as before. A benchmark id ('bcw_exact', ...) aligns
+    '<id>_labelonly' on every party - identity columns are identical in a
+    benchmark's two layouts, so this is the same alignment training uses.
+    Schema discovery, automatic-mode snapshots and PSI all read that label.
 
     matching_method: "exact" (hash-based exact match on the full name -
     fast, but a single typo or nickname produces no match at all) or
@@ -123,6 +131,9 @@ def central(
         # direct caller passing psi_capacity="auto" without setting
         # this new argument keeps working exactly as already tested.
         psi_capacity = _psi_capacity.AUTOMATIC_CAPACITY_SENTINEL
+    datasets.validate_psi_selection(dataset, matching_method, psi_capacity)
+    psi_label = datasets.psi_database_label(dataset)
+    database_by_client_id = {0: psi_label, 1: psi_label, 2: psi_label} if psi_label else None
 
     # Ties every job this run dispatches - across all client and
     # aggregator hosts - back to this one orchestrated run, so anyone
@@ -131,8 +142,8 @@ def central(
     # piece of it. Also logged below and returned in the summary.
     run_id = str(uuid.uuid4())
 
-    info(f"Central: starting PSI run (run_id={run_id}, method={matching_method}, "
-         f"fuzzy_threshold={fuzzy_threshold}) - clients={client_org_ids}, aggregators={agg_org_ids}")
+    info(f"Central: starting PSI run (run_id={run_id}, dataset={dataset}, database={psi_label}, "
+         f"method={matching_method}, fuzzy_threshold={fuzzy_threshold}) - clients={client_org_ids}, aggregators={agg_org_ids}")
 
     kwargs = {"matching_method": matching_method, "fuzzy_threshold": fuzzy_threshold, "run_id": run_id}
 
@@ -157,6 +168,7 @@ def central(
     if is_automatic_capacity:
         negotiation_ok, max_entities, negotiation_detail = _psi_capacity.negotiate_automatic_capacity(
             client, client_org_ids, agg_org_ids, run_id, fuzzy_threshold,
+            database_by_client_id=database_by_client_id,
         )
         info(f"Central: automatic capacity negotiation {'PASSED' if negotiation_ok else 'FAILED'} "
              f"- {negotiation_detail}")
@@ -170,11 +182,13 @@ def central(
                 "summary": [
                     {"metric": "run_id", "value": run_id},
                     {"metric": "overall_status", "value": "capacity_negotiation_error"},
+                    {"metric": "dataset", "value": dataset},
                     {"metric": "matching_method", "value": matching_method},
                     {"metric": "message", "value": message},
                 ],
                 "run_id": run_id,
                 "overall_status": "capacity_negotiation_error",
+                "dataset": dataset,
                 "matching_method": matching_method,
                 "fuzzy_threshold": fuzzy_threshold if matching_method in ("fuzzy", "fuzzy_experimental") else None,
                 "intersection_size": None,
@@ -201,6 +215,7 @@ def central(
             input_={"method": "report_schema_run", "kwargs": {
                 "run_id": run_id, "include_row_count": not is_automatic_capacity,
                 **({"capacity_mode": "dynamic"} if is_automatic_capacity else {}),
+                **({"database": psi_label} if psi_label else {}),
             }},
             organizations=[org_id], name=f"schema-psi-{org_id}",
         )["id"]
@@ -242,6 +257,8 @@ def central(
     # this only applies to the client-share kwargs, not the shared dict
     # used for the aggregator loop below.
     client_kwargs = dict(kwargs, debug=debug)
+    if database_by_client_id:
+        client_kwargs["database_by_client_id"] = database_by_client_id
 
     tasks = {}
     for org_id in client_org_ids:
@@ -348,6 +365,7 @@ def central(
         "summary": [
             {"metric": "run_id", "value": run_id},
             {"metric": "overall_status", "value": overall_status},
+            {"metric": "dataset", "value": dataset},
             {"metric": "matching_method", "value": matching_method},
             {"metric": "fuzzy_threshold", "value": fuzzy_threshold if matching_method in ("fuzzy", "fuzzy_experimental") else None},
             {"metric": "intersection_size", "value": intersection_size},
@@ -358,6 +376,7 @@ def central(
         ],
         "run_id": run_id,
         "overall_status": overall_status,
+        "dataset": dataset,
         "matching_method": matching_method,
         "fuzzy_threshold": fuzzy_threshold if matching_method in ("fuzzy", "fuzzy_experimental") else None,
         "intersection_size": intersection_size,
