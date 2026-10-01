@@ -482,6 +482,15 @@ def central_train(
         raise ValueError(f"n_samples must be a positive int, got {n_samples!r}")
     n_samples = datasets.validate_selection(dataset, algorithm, matching_method, psi_capacity,
                                             privacy_mode=privacy_mode, n_samples=n_samples)
+    # The label party may also be ticked as a feature party (it does hold
+    # features in aggVFL/splitVFL); its features are used through its role
+    # as label party, so it is dropped here, as are duplicates.
+    feature_org_ids = [org for org in dict.fromkeys(feature_org_ids) if org != label_org_id]
+    if len(feature_org_ids) != 2:
+        raise ValueError(
+            "Feature parties must be the two organizations other than the label party "
+            f"(e.g. FP1 and FP2); got {feature_org_ids} besides label party {label_org_id}"
+        )
 
     spec = _ARCHITECTURES[architecture][privacy_mode]
     # Ties every job this run dispatches - across every feature, label,
