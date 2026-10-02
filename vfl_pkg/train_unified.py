@@ -1,3 +1,4 @@
+import json
 import re
 import uuid
 
@@ -240,6 +241,81 @@ def _collective_fuzzy_experimental_check(client, client_org_ids, agg_org_ids, ru
             for org_id in client_org_ids
         }
     return ok, detail, approved_mapping_digest_by_client_id
+
+
+def _describe_model(descriptor):
+    """Plain description of the delivered model from the public (structural)
+    descriptor in the share headers: no names, scales or values."""
+    model = descriptor.get("model") or {}
+    slots = {s.get("client_id"): s.get("count") for s in descriptor.get("input_slots") or []}
+    n_inputs = sum(c for c in slots.values() if isinstance(c, int))
+    inputs = f"{n_inputs} inputs (FP1 {slots.get(0)}, FP2 {slots.get(1)}, LP {slots.get(2)})"
+    output = "probability (sigmoid)" if model.get("output") == "sigmoid" else "value (linear)"
+    sizes = []
+    for entry in descriptor.get("layout") or []:
+        size = 1
+        for dim in entry.get("shape") or []:
+            size *= dim
+        sizes.append((entry.get("name"), size))
+    n_params = sum(s for _, s in sizes)
+    if model.get("family") == "one_layer":
+        kind = "logistic regression" if model.get("output") == "sigmoid" else "linear regression"
+        return f"{kind}: {inputs} -> 1 {output}", f"{n_params} values ({n_params - 1} weights + 1 bias)"
+    if model.get("family") == "two_layer":
+        hidden = model.get("hidden")
+        weights = sum(s for name, s in sizes if name.endswith(".W"))
+        return (f"two-layer neural network: {inputs} -> {hidden} hidden units (ReLU) -> 1 {output}",
+                f"{n_params} values ({weights} weights + {n_params - weights} biases)")
+    return "unknown model structure", f"{n_params} values"
+
+
+def _secure_summary(run_id, overall_status, architecture, dataset, matching_method, fuzzy_threshold, aligned_count,
+                    clients_ok, aggregators_ok, researcher_output, shares, preprocessing):
+    """The secure-mode summary table: what was trained and which encrypted
+    packages arrived, from the envelopes' public headers only. This function
+    cannot open the packages, so it never claims the model is valid or that
+    the signatures verify - that happens on the researcher's machine."""
+    delivered = (researcher_output or {}).get("status") == "encrypted_shares_delivered"
+    share_heads = [e.get("header") or {} for e in shares]
+    prep_heads = [e.get("header") or {} for e in preprocessing]
+    rows = [
+        ("run_id", run_id),
+        ("delivery", "Training finished; all encrypted packages received" if delivered
+         else "No model delivered - see party_errors (nothing usable was released)"),
+        ("overall_status", overall_status),
+        ("architecture", architecture),
+        ("dataset", dataset),
+        ("privacy_mode", "secure"),
+        ("matching_method", matching_method),
+    ]
+    if matching_method in ("fuzzy", "fuzzy_experimental"):
+        rows.append(("fuzzy_threshold", fuzzy_threshold))
+    rows += [("aligned_count", aligned_count), ("clients_ok", clients_ok), ("aggregators_ok", aggregators_ok)]
+    roles = {0: "FP1", 1: "FP2", 2: "LP"}
+    rows.append(("computing_party_packages", f"{len(share_heads)} of 3 received" + (
+        f" (parties {', '.join(str(i) for i in sorted(h.get('share_index') for h in share_heads))})"
+        if share_heads else "")))
+    rows.append(("data_holder_packages", f"{len(prep_heads)} of 3 received" + (
+        f" ({', '.join(roles.get(h.get('client_id'), '?') for h in sorted(prep_heads, key=lambda h: str(h.get('client_id'))))})"
+        if prep_heads else "")))
+    if delivered and share_heads:
+        descriptor = share_heads[0].get("descriptor") or {}
+        model, params = _describe_model(descriptor)
+        rows += [("model", model), ("parameters", params)]
+        recipients = {json.dumps(h.get("recipient"), sort_keys=True) for h in share_heads + prep_heads}
+        recipient = (share_heads[0].get("recipient") or {}) if len(recipients) == 1 else None
+        rows.append(("encrypted_for", f"{recipient.get('organization')}, key {str(recipient.get('key_sha256'))[:16]}…"
+                     if recipient else "packages name different recipients - do not use"))
+        builds = {json.dumps(h.get("descriptor", {}).get("build"), sort_keys=True) for h in share_heads}
+        build = descriptor.get("build") or {}
+        rows.append(("circuit_build", f"generator v{build.get('generator_version')}, bytecode "
+                     f"{str(build.get('bytecode_sha256'))[:16]}… ("
+                     + ("same build reported by all 3 computing parties" if len(builds) == 1
+                        else "computing parties report different builds") + ")"))
+        rows.append(("signatures", "attached to every package; not checked by the server - checked against your "
+                                   "pinned certificates when you open the model"))
+        rows.append(("next_step", f"open on your own machine: vfl-open {run_id}"))
+    return [{"metric": k, "value": v} for k, v in rows]
 
 
 def _researcher_output_preflight(client, org_ids, researcher_key_sha256, run_id):
@@ -1167,8 +1243,11 @@ def central_train(
          f"clients_ok={clients_ok}, aggregators_ok={aggregators_ok})"
          + (f", errors={party_errors}" if party_errors else ""))
 
-    output = {
-        "summary": [
+    if privacy_mode == "secure":
+        summary = _secure_summary(run_id, overall_status, architecture, dataset, matching_method, fuzzy_threshold,
+                                  aligned_count, clients_ok, aggregators_ok, researcher_output, shares, preprocessing)
+    else:
+        summary = [
             {"metric": "run_id", "value": run_id},
             {"metric": "overall_status", "value": overall_status},
             {"metric": "architecture", "value": architecture},
@@ -1180,7 +1259,9 @@ def central_train(
             {"metric": "predictions_agree", "value": predictions_agree},
             {"metric": "clients_ok", "value": clients_ok},
             {"metric": "aggregators_ok", "value": aggregators_ok},
-        ] + ([{"metric": "researcher_output", "value": researcher_output["status"]}] if researcher_output else []),
+        ]
+    output = {
+        "summary": summary,
         "run_id": run_id,
         "overall_status": overall_status,
         "architecture": architecture,
