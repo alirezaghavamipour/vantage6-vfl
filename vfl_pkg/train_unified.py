@@ -1,3 +1,4 @@
+import re
 import uuid
 
 from vantage6.algorithm.tools.decorators import algorithm_client
@@ -241,6 +242,26 @@ def _collective_fuzzy_experimental_check(client, client_org_ids, agg_org_ids, ru
     return ok, detail, approved_mapping_digest_by_client_id
 
 
+def _researcher_output_preflight(client, org_ids, researcher_key_sha256, run_id):
+    """Dispatches researcher_output_check to every party at once; returns
+    {org_id: {"status", "reason"}} for each party that is not ready (empty
+    when all are)."""
+    tasks = {org_id: client.task.create(
+        input_={"method": "researcher_output_check",
+                "kwargs": {"recipient_key_sha256": researcher_key_sha256, "run_id": run_id}},
+        organizations=[org_id], name=f"researcher-output-check-{org_id}")["id"] for org_id in org_ids}
+    not_ready = {}
+    for org_id, task_id in tasks.items():
+        res = client.wait_for_results(task_id=task_id)
+        r = res[0] if res else None
+        if not (isinstance(r, dict) and r.get("status") == "complete" and r.get("researcher_output") == "ready"):
+            reason = (r or {}).get("reason")
+            not_ready[org_id] = {"status": (r or {}).get("status", "no result"),
+                                 "reason": reason if isinstance(reason, str) and re.fullmatch(r"[A-Za-z]+", reason)
+                                 else None}
+    return not_ready
+
+
 @algorithm_client
 def central_train(
     client: AlgorithmClient,
@@ -257,6 +278,7 @@ def central_train(
     algorithm: str = "logistic",
     debug: bool = False,
     dataset: str = datasets.DEFAULT_DATASET,
+    researcher_key_sha256: str = None,
 ):
     """
     Train a vertical federated learning model - pick which of the 4
@@ -378,28 +400,32 @@ def central_train(
         an exact 0/1 value, predictions are 0/1 classifications.
       - 'linear': regression - the label is a continuous value,
         normalized and fixed-point encoded the same way every feature
-        column already is. Predictions come back as NORMALIZED values
-        (not yet scaled to the label's real units) so every party
-        reports an identical number - only the label party's own
-        result also includes 'label_max', since it's the only party
-        that ever learns the label's true scale; multiply a normalized
-        prediction by label_max to get the value in real units.
+        column already is.
 
-    Predictions are revealed identically to every client party (feature
-    and label parties alike), so each one can independently verify the
-    trained model - this function cross-checks that they all agree.
-    That reveal happens regardless of this function's own arguments; it
-    is a property of the training circuit itself, not of this
-    orchestrator.
+    Output in secure mode (researcher-only, Stage 2): no prediction or
+    model value is revealed to any data holder or computing party. The
+    data holders learn only the collective validity bit. The trained
+    weights and biases leave the computation only as three output shares,
+    one per computing party, each encrypted to the researcher's key and
+    signed by that party; each data holder adds an envelope, encrypted
+    to the same key and signed by that data holder, with its column
+    names, normalization scales and (label party) the label encoding.
+    researcher_key_sha256 (required in secure mode) is the SHA-256
+    fingerprint of the researcher's public key; every host compares it
+    with the key configured on that host and refuses on a mismatch.
 
-    By default this function itself returns only a summary (aligned row
-    count, whether the parties' predictions agreed, whether the
-    computing parties completed successfully) - not the raw per-row
-    predictions themselves, since the task submitter is not necessarily
-    one of the data-holding organizations and has no inherent need to
-    see every row's predicted label. Set debug=True to also include the
-    full per-party results (including the raw predictions), for
-    auditing one specific run.
+    This function's normal result (no debug needed) forwards those six
+    envelopes under "researcher_output". Its status says only that the
+    encrypted shares were delivered ("encrypted_shares_delivered"):
+    neither this function nor the server can see, and so cannot assert,
+    whether they reconstruct into a valid model. That is decided by the
+    researcher's own tool (daemons/researcher_reconstruct.py), which
+    also refuses an invalid run. A collectively rejected run (invalid
+    alignment) yields no researcher output at all.
+
+    non_secure mode is unchanged: predictions are revealed to every
+    client party and compared here, and debug=True adds the per-party
+    results.
     """
     if architecture not in _ARCHITECTURES:
         raise ValueError(
@@ -470,6 +496,12 @@ def central_train(
         raise ValueError(
             f"algorithm={algorithm!r} is not supported "
             f"(choose 'logistic' or 'linear')"
+        )
+    if privacy_mode == "secure" and not (isinstance(researcher_key_sha256, str)
+                                         and re.fullmatch(r"[0-9a-f]{64}", researcher_key_sha256)):
+        raise ValueError(
+            "secure training releases the model only to the researcher: researcher_key_sha256 must be "
+            "the SHA-256 fingerprint (64 lowercase hex characters) of the researcher's public key"
         )
     # n_samples ends up embedded directly in generated .mpc circuit
     # source text on the aggregator (see circuit_generator.py's
@@ -547,6 +579,35 @@ def central_train(
     # circuit) stays secure-only below - non_secure has no compiled
     # circuit to size and discovers its own columns locally at training
     # time.
+    if privacy_mode == "secure":
+        # Stage 2 researcher-only output: every data holder and computing
+        # party must be configured for this researcher before any PSI or
+        # training runs; otherwise the run is refused here, with nothing
+        # computed (a host that is not ready would otherwise refuse only
+        # mid-run and leave the others waiting on it).
+        not_ready = _researcher_output_preflight(client, client_org_ids + list(agg_org_ids),
+                                                 researcher_key_sha256, run_id)
+        if not_ready:
+            message = "researcher output is not configured for this key on every party; nothing was computed"
+            info(f"Central (train {architecture}, secure): {message} - {not_ready}")
+            return {
+                "summary": [
+                    {"metric": "run_id", "value": run_id},
+                    {"metric": "overall_status", "value": "researcher_output_rejected"},
+                    {"metric": "architecture", "value": architecture},
+                    {"metric": "privacy_mode", "value": privacy_mode},
+                    {"metric": "message", "value": message},
+                ],
+                "run_id": run_id,
+                "overall_status": "researcher_output_rejected",
+                "architecture": architecture,
+                "dataset": dataset,
+                "privacy_mode": privacy_mode,
+                "party_errors": not_ready,
+                "researcher_output": {"status": "not_delivered", "run_id": run_id},
+                "message": message,
+            }
+
     agg_kwargs = dict(kwargs)
     fp1_org, fp2_org = feature_org_ids[0], feature_org_ids[1]
 
@@ -786,7 +847,8 @@ def central_train(
         client_kwargs = dict(kwargs, algorithm=algorithm, max_entities=max_entities, debug=debug,
                               database_by_client_id=database_by_client_id,
                               expected_n_features_by_client_id=expected_n_features_by_client_id,
-                              capacity_mode="dynamic" if is_automatic_capacity else "manual")
+                              capacity_mode="dynamic" if is_automatic_capacity else "manual",
+                              recipient_key_sha256=researcher_key_sha256)
         if n_samples is not None:
             client_kwargs["n_samples_bound"] = n_samples
     else:
@@ -872,7 +934,8 @@ def central_train(
             tasks[org_id] = t["id"]
         for org_id in agg_org_ids:
             t = client.task.create(
-                input_={"method": spec["agg_action"], "kwargs": agg_kwargs},
+                input_={"method": spec["agg_action"],
+                        "kwargs": dict(agg_kwargs, recipient_key_sha256=researcher_key_sha256)},
                 organizations=[org_id],
                 name=f"train-{architecture}-agg-{org_id}",
             )
@@ -926,15 +989,13 @@ def central_train(
         results[org_id] = res[0] if res else None
 
     aligned_count = None
-    # secure mode: client subtasks now report a predictions_hash instead
-    # of raw predictions unless debug=True (see _redact_training_result
-    # in mpc_daemon_client_v2.py) - Rep3's correctness cross-check only
-    # needs to confirm every client's predictions came out byte-identical,
-    # not what they actually are, so comparing hashes works the same
-    # whether or not debug also requested the raw values. non_secure
-    # (vanilla) mode's leak is deliberately left as-is for now (already
-    # documented as insecure-by-design), so its subtasks still return raw
-    # predictions with no hash - compared directly as before.
+    # secure mode (Stage 2): client subtasks report no predictions at all -
+    # the circuit reveals only the collective validity bit to them - so
+    # there is no cross-party prediction comparison; see the researcher-
+    # output assembly below. non_secure (vanilla) mode's leak is
+    # deliberately left as-is for now (already documented as
+    # insecure-by-design), so its subtasks still return raw predictions,
+    # compared directly as before.
     #
     # R05 fix: predictions_agree (like central.py's clients_agree) is
     # only computed over parties that actually completed - a prior
@@ -1032,25 +1093,54 @@ def central_train(
 
     clients_ok = all(s == "complete" for s in client_statuses.values())
 
-    predictions_by_org = {}
     for org_id in client_org_ids:
         r = results.get(org_id)
-        if client_statuses[org_id] == "complete":
-            predictions_by_org[org_id] = (
-                r.get("predictions_hash") if privacy_mode == "secure" else r.get("predictions")
-            )
-            if aligned_count is None:
-                aligned_count = r.get("aligned_count")
+        if client_statuses[org_id] == "complete" and aligned_count is None:
+            aligned_count = r.get("aligned_count")
 
-    def _agree_key(p):
-        return p if privacy_mode == "secure" else tuple(p)
+    researcher_output = None
+    if privacy_mode == "secure":
+        # Stage 2 researcher-only output: no party reports predictions any
+        # more, so there is nothing to cross-compare (predictions_agree is
+        # not applicable). What is checked here is only that every party
+        # completed and that all six envelopes arrived - three output-share
+        # envelopes (one per computing party) and three preprocessing
+        # envelopes (one per data holder). Every party only reaches
+        # "complete" after the circuit's collective validity bit came back
+        # 1, so a collectively rejected run never gets here with envelopes.
+        # The envelopes are opaque to this function; whether they decrypt,
+        # verify and reconstruct into a valid model is for the researcher's
+        # tool alone to decide, so the status says "delivered", never
+        # "success".
+        shares = [results[o]["share_envelope"] for o in agg_org_ids
+                  if (results.get(o) or {}).get("status") == "complete"
+                  and isinstance(results[o].get("share_envelope"), dict)]
+        preprocessing = [results[o]["preprocessing_envelope"] for o in client_org_ids
+                         if client_statuses[o] == "complete"
+                         and isinstance(results[o].get("preprocessing_envelope"), dict)]
+        share_indexes = sorted((e.get("header") or {}).get("share_index", -1) for e in shares)
+        client_ids = sorted((e.get("header") or {}).get("client_id", -1) for e in preprocessing)
+        delivered = (clients_ok and aggregators_ok and share_indexes == [0, 1, 2] and client_ids == [0, 1, 2])
+        predictions_agree = None
+        overall_status = "encrypted_shares_delivered" if delivered else "incomplete"
+        researcher_output = ({"status": "encrypted_shares_delivered", "run_id": run_id,
+                              "shares": shares, "preprocessing": preprocessing,
+                              "note": "encrypted to the researcher's key; reconstruct and validate locally with "
+                                      "researcher_reconstruct.py - this result cannot confirm a usable model"}
+                             if delivered else {"status": "not_delivered", "run_id": run_id})
+    else:
+        predictions_by_org = {}
+        for org_id in client_org_ids:
+            r = results.get(org_id)
+            if client_statuses[org_id] == "complete":
+                predictions_by_org[org_id] = r.get("predictions")
 
-    predictions_agree = clients_ok and len(
-        {_agree_key(p) for p in predictions_by_org.values() if p is not None}
-    ) == 1
+        predictions_agree = clients_ok and len(
+            {tuple(p) for p in predictions_by_org.values() if p is not None}
+        ) == 1
 
-    # aggregators_ok computed earlier (needed there for the no_matches check too).
-    overall_status = "success" if (clients_ok and aggregators_ok and predictions_agree) else "incomplete"
+        # aggregators_ok computed earlier (needed there for the no_matches check too).
+        overall_status = "success" if (clients_ok and aggregators_ok and predictions_agree) else "incomplete"
 
     # Sanitized per-party errors, same rationale as central.py's R05
     # fix: status + message only, surfaced for every party that did NOT
@@ -1090,7 +1180,7 @@ def central_train(
             {"metric": "predictions_agree", "value": predictions_agree},
             {"metric": "clients_ok", "value": clients_ok},
             {"metric": "aggregators_ok", "value": aggregators_ok},
-        ],
+        ] + ([{"metric": "researcher_output", "value": researcher_output["status"]}] if researcher_output else []),
         "run_id": run_id,
         "overall_status": overall_status,
         "architecture": architecture,
@@ -1105,16 +1195,20 @@ def central_train(
         "party_errors": party_errors,
     }
 
+    if researcher_output is not None:
+        # Forwarded in the normal result - no debug needed.
+        output["researcher_output"] = researcher_output
+
     if debug:
-        # secure mode: raw predictions are only present in a client
-        # subtask's own result when debug=True made it all the way down
-        # to that party (see client_kwargs above) - non_secure mode
-        # never redacted them in the first place.
-        output["predictions"] = next(
-            (results[org_id].get("predictions") for org_id in client_org_ids
-             if results.get(org_id) and results[org_id].get("predictions") is not None),
-            None,
-        )
+        # secure mode has no predictions anywhere (Stage 2); its per-party
+        # results carry only statuses, counts and ciphertext. non_secure
+        # mode is unchanged.
+        if privacy_mode != "secure":
+            output["predictions"] = next(
+                (results[org_id].get("predictions") for org_id in client_org_ids
+                 if results.get(org_id) and results[org_id].get("predictions") is not None),
+                None,
+            )
         output["client_results"] = {org_id: results.get(org_id) for org_id in client_org_ids}
         output["aggregator_results"] = {org_id: results.get(org_id) for org_id in agg_org_ids}
 

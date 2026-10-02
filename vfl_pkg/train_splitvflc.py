@@ -22,7 +22,8 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
              run_id: str = None, schema: dict = None, algorithm: str = None,
              n_samples_bound: int = None, max_entities: int = None, debug: bool = False,
              database_by_client_id: dict = None, expected_n_features_by_client_id: dict = None,
-             approved_mapping_digest_by_client_id: dict = None, capacity_mode: str = "manual") -> dict:
+             approved_mapping_digest_by_client_id: dict = None, capacity_mode: str = "manual",
+             recipient_key_sha256: str = None) -> dict:
     if matching_method == "fuzzy" and fuzzy_threshold not in SUPPORTED_FUZZY_THRESHOLDS:
         raise ValueError(
             f"fuzzy_threshold={fuzzy_threshold} is not supported "
@@ -71,6 +72,12 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     # count-disclosure fix: see train.py's matching comment.
     if capacity_mode != "manual":
         job["capacity_mode"] = capacity_mode
+    # Stage 2 researcher-only output: the SHA-256 fingerprint of the
+    # researcher key this run must deliver to. Each host compares it with
+    # its own configured key and refuses on a mismatch; the key itself
+    # never comes from the task.
+    if recipient_key_sha256:
+        job["recipient_key_sha256"] = recipient_key_sha256
     publish_job(JOBS_DIR, job)
     info(f"Train (splitVFLc): submitted job {job_id} ({action}, method={matching_method}, "
          f"fuzzy_threshold={fuzzy_threshold}), waiting for host daemon...")
@@ -84,7 +91,8 @@ def train_client_run_splitvflc(matching_method: str = "exact", fuzzy_threshold: 
                     run_id: str = None, algorithm: str = None, n_samples_bound: int = None,
                     max_entities: int = None, debug: bool = False,
                     database_by_client_id: dict = None, expected_n_features_by_client_id: dict = None,
-                    approved_mapping_digest_by_client_id: dict = None, capacity_mode: str = "manual"):
+                    approved_mapping_digest_by_client_id: dict = None, capacity_mode: str = "manual",
+                      recipient_key_sha256: str = None):
     """Feature/label party: align rows and share this party's own
     columns into the splitVFLc training computation (Rep3 MPC -
     private).
@@ -103,11 +111,12 @@ def train_client_run_splitvflc(matching_method: str = "exact", fuzzy_threshold: 
                      debug=debug, database_by_client_id=database_by_client_id,
                      expected_n_features_by_client_id=expected_n_features_by_client_id,
                      approved_mapping_digest_by_client_id=approved_mapping_digest_by_client_id,
-                     capacity_mode=capacity_mode)
+                     capacity_mode=capacity_mode, recipient_key_sha256=recipient_key_sha256)
 
 
 def train_party_run_splitvflc(matching_method: str = "exact", fuzzy_threshold: int = 2,
-                    run_id: str = None, schema: dict = None, max_entities: int = None):
+                    run_id: str = None, schema: dict = None, max_entities: int = None,
+                     recipient_key_sha256: str = None):
     """Computing party: run this party's role in the Rep3 splitVFLc
     training computation (trainable-module vertical FL; the label party
     contributes no features of its own, same as aggVFLc). This
@@ -124,4 +133,5 @@ def train_party_run_splitvflc(matching_method: str = "exact", fuzzy_threshold: i
     plaintext (see train_splitvflc_vanilla.py), so accuracy/predictions
     are directly comparable across privacy_mode for this architecture.
     """
-    return _run_job("train_party_run_splitvflc", matching_method, fuzzy_threshold, run_id, schema, max_entities=max_entities)
+    return _run_job("train_party_run_splitvflc", matching_method, fuzzy_threshold, run_id, schema, max_entities=max_entities,
+                    recipient_key_sha256=recipient_key_sha256)
