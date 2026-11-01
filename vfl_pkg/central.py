@@ -37,9 +37,10 @@ def central(
     psi_capacity_mode: str = "manual",
     debug: bool = False,
     dataset: str = datasets.DEFAULT_DATASET,
-    group_by_role: bool = False,
-    poll_interval: float = 1.0,
-    readiness: bool = False,
+    group_by_role: bool = True,
+    poll_interval: float = 0.2,
+    readiness: bool = True,
+    exact_capacity: int = None,
 ):
     """
     Orchestrate a full Rep3 PSI run in one submission: dispatch
@@ -72,6 +73,18 @@ def central(
     party's individual raw result - to avoid unnecessarily exposing
     e.g. each client's own local dataset size. Set debug=True to also
     include the full per-party results, for auditing one specific run.
+
+    exact_capacity (matching_method="exact"): an explicit bound on every
+    party's raw row count. Skips schema discovery; each client checks its
+    own input against it inside the PSI circuit, which stops every party if
+    any input does not fit. 0 or None discovers the bound as before.
+
+    group_by_role / poll_interval / readiness: orchestration options - one
+    subtask per role instead of per organization (results always keyed by
+    organization), the polling interval in seconds for this orchestrator,
+    its subtasks and their bridge waits, and whether clients wait for the
+    computing parties' readiness signal (which also binds a client to its
+    own run) before connecting.
 
     F02: for matching_method="fuzzy" (the current production circuit),
     this function's result is DIAGNOSTIC ONLY, never a validated training
@@ -158,10 +171,14 @@ def central(
     # Exact PSI with an explicit capacity needs no schema discovery: every
     # client checks its own input against that capacity inside the PSI
     # circuit, which aborts for all parties if any input does not fit.
-    explicit_exact_capacity = matching_method == "exact" and psi_capacity is not None
-    if explicit_exact_capacity and (isinstance(psi_capacity, bool) or not isinstance(psi_capacity, int)
-                                    or not 1 <= psi_capacity <= MAX_EXPLICIT_EXACT_CAPACITY):
-        raise ValueError(f"psi_capacity={psi_capacity!r} must be an integer between 1 and {MAX_EXPLICIT_EXACT_CAPACITY}")
+    if exact_capacity == 0:
+        exact_capacity = None  # 0 (the UI default) means: discover the capacity automatically
+    if exact_capacity is not None and matching_method != "exact":
+        raise ValueError("exact_capacity applies to matching_method='exact' only")
+    explicit_exact_capacity = exact_capacity is not None
+    if explicit_exact_capacity and (isinstance(exact_capacity, bool) or not isinstance(exact_capacity, int)
+                                    or not 1 <= exact_capacity <= MAX_EXPLICIT_EXACT_CAPACITY):
+        raise ValueError(f"exact_capacity={exact_capacity!r} must be an integer between 1 and {MAX_EXPLICIT_EXACT_CAPACITY}")
 
     # Ties every job this run dispatches - across all client and
     # aggregator hosts - back to this one orchestrated run, so anyone
@@ -239,7 +256,7 @@ def central(
     # from the snapshot negotiation just retained above, instead of a
     # fresh CSV read.
     if explicit_exact_capacity:
-        max_entities = psi_capacity
+        max_entities = exact_capacity
         info(f"Central: explicit exact-PSI capacity {max_entities} - schema discovery skipped")
     else:
         schema_deadline = time.time() + SCHEMA_BUDGET_SECONDS
@@ -352,10 +369,15 @@ def central(
         r = results.get(org_id)
         status = (r or {}).get("status")
         if status != "complete":
-            party_errors[org_id] = {
-                "status": status,
-                "message": (r or {}).get("message", "no result received"),
-            }
+            if r is None:
+                message = "no result received"
+            elif r.get("message"):
+                message = r["message"]
+            elif r.get("returncode") is not None:
+                message = f"MPC party exited with code {r['returncode']}"
+            else:
+                message = "failed without a message"
+            party_errors[org_id] = {"status": status, "message": message}
 
     info(f"Central: PSI {overall_status} - intersection_size={intersection_size}, "
          f"clients_agree={clients_agree}, clients_ok={clients_ok}, aggregators_ok={aggregators_ok}"
