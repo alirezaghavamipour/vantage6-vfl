@@ -5,6 +5,9 @@ import uuid
 
 from vantage6.algorithm.tools.util import info
 
+from . import _bridge_io
+from ._bridge_io import publish_job, wait_for_result
+
 BRIDGE = "/mnt/mpcbridge"
 JOBS_DIR = os.path.join(BRIDGE, "jobs")
 RESULTS_DIR = os.path.join(BRIDGE, "results")
@@ -16,7 +19,7 @@ TIMEOUT = 60
 
 
 def report_schema_run(database: str = None, run_id: str = None, include_row_count: bool = True,
-                       capacity_mode: str = "manual"):
+                       capacity_mode: str = "manual", deadline: float = None, poll_interval: float = None):
     """Feature/label party: report this party's local row count and
     feature-column count for the given database, read directly from its
     own CSV (every column except full_name/target) - lets central_train
@@ -45,6 +48,7 @@ def report_schema_run(database: str = None, run_id: str = None, include_row_coun
     own dispatch ordering for automatic mode, which negotiates capacity
     BEFORE dispatching schema discovery for this reason.
     """
+    _bridge_io.configure(poll_interval=poll_interval, deadline=deadline)
     job_id = str(uuid.uuid4())
     job = {"job_id": job_id, "action": "report_schema"}
     if database:
@@ -56,19 +60,9 @@ def report_schema_run(database: str = None, run_id: str = None, include_row_coun
     # count-disclosure fix's own convention (see psi.py's _run_job).
     if capacity_mode != "manual":
         job["capacity_mode"] = capacity_mode
-    os.makedirs(JOBS_DIR, exist_ok=True)
-    with open(os.path.join(JOBS_DIR, job_id + ".json"), "w") as f:
-        json.dump(job, f)
+    publish_job(JOBS_DIR, job, timeout_s=TIMEOUT)
     info(f"Schema: submitted job {job_id} (run_id={run_id}, database={database}), "
          f"waiting for host daemon...")
-
-    result_path = os.path.join(RESULTS_DIR, job_id + ".json")
-    for _ in range(TIMEOUT):
-        if os.path.exists(result_path):
-            with open(result_path) as f:
-                result = json.load(f)
-            os.remove(result_path)
-            info(f"Schema: job {job_id} completed with status {result.get('status')}")
-            return result
-        time.sleep(1)
-    raise TimeoutError(f"Schema: host daemon did not respond to job {job_id} within {TIMEOUT}s")
+    result = wait_for_result(RESULTS_DIR, job_id, TIMEOUT, label="Schema")
+    info(f"Schema: job {job_id} completed with status {result.get('status')}")
+    return result

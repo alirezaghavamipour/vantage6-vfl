@@ -39,7 +39,7 @@ def researcher_output_check(recipient_key_sha256: str, run_id: str = None, timeo
     job = {"job_id": job_id, "action": "researcher_output_check", "recipient_key_sha256": recipient_key_sha256}
     if run_id:
         job["run_id"] = run_id
-    publish_job(JOBS_DIR, job)
+    publish_job(JOBS_DIR, job, timeout_s=timeout_s)
     return wait_for_result(RESULTS_DIR, job_id, timeout_s, label="researcher output check")
 
 
@@ -49,7 +49,7 @@ def aggregator_output_share(run_id: str, mpc_port: int, architecture: str, algor
     publish_job(JOBS_DIR, {"job_id": job_id, "action": "output_share_party_run", "run_id": run_id,
                            "mpc_port": mpc_port, "architecture": architecture, "algorithm": algorithm,
                            "schema": schema, "feature_order": feature_order,
-                           "recipient_key_sha256": recipient_key_sha256})
+                           "recipient_key_sha256": recipient_key_sha256}, timeout_s=timeout_s)
     info(f"Output share: waiting for run {run_id}")
     result = wait_for_result(RESULTS_DIR, job_id, timeout_s, label="output share")
     info(f"Output share: run {run_id} finished with status {result.get('status')}")

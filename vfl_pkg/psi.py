@@ -3,6 +3,7 @@ import uuid
 
 from vantage6.algorithm.tools.util import info
 
+from . import _bridge_io
 from ._bridge_io import publish_job, wait_for_result
 
 BRIDGE = "/mnt/mpcbridge"
@@ -90,7 +91,7 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     if capacity_mode != "manual":
         job["capacity_mode"] = capacity_mode
     timeout = TIMEOUT_BY_METHOD.get(matching_method, 120)
-    publish_job(JOBS_DIR, job)
+    publish_job(JOBS_DIR, job, timeout_s=timeout)
     info(f"PSI: submitted job {job_id} (run_id={run_id}, {action}, method={matching_method}, "
          f"fuzzy_threshold={fuzzy_threshold}), waiting for host daemon...")
 
@@ -102,8 +103,13 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
 def psi_client_share(matching_method: str = "exact", fuzzy_threshold: int = 2,
                       run_id: str = None, max_entities: int = None, debug: bool = False,
                       reveal_align_keys: bool = False, database_by_client_id: dict = None,
-                      capacity_mode: str = "manual"):
+                      capacity_mode: str = "manual", deadline: float = None, poll_interval: float = None,
+                      readiness: bool = False):
     """Feature/label party: share local entity data into the MPC computation.
+
+    deadline / poll_interval / readiness: set by central() - the run's shared
+    absolute deadline, the bridge poll interval, and whether to wait for the
+    computing parties' readiness signal before connecting.
 
     matching_method: "exact" (hash-based exact match) or "fuzzy"
     (nickname-canonicalized, typo-tolerant edit-distance match).
@@ -128,17 +134,30 @@ def psi_client_share(matching_method: str = "exact", fuzzy_threshold: int = 2,
     matters for matching_method="fuzzy_experimental"; every other method
     is unaffected.
     """
+    _bridge_io.configure(poll_interval=poll_interval, deadline=deadline, readiness=readiness)
     return _run_job("psi_client_run", matching_method, fuzzy_threshold, run_id, max_entities, debug,
                      reveal_align_keys=reveal_align_keys, database_by_client_id=database_by_client_id,
                      capacity_mode=capacity_mode)
 
 
 def psi_party_run(matching_method: str = "exact", fuzzy_threshold: int = 2,
-                   run_id: str = None, max_entities: int = None, capacity_mode: str = "manual"):
+                   run_id: str = None, max_entities: int = None, capacity_mode: str = "manual",
+                   deadline: float = None, poll_interval: float = None, readiness: bool = False):
     """Computing party: run this party's role in the Rep3 PSI computation.
 
     run_id: see psi_client_share - shared identifier set by central() for
-    cross-host job correlation. max_entities: see psi_client_share.
+    cross-host job correlation. max_entities, deadline, poll_interval,
+    readiness: see psi_client_share.
     """
+    _bridge_io.configure(poll_interval=poll_interval, deadline=deadline, readiness=readiness)
     return _run_job("psi_party_run", matching_method, fuzzy_threshold, run_id, max_entities,
                      capacity_mode=capacity_mode)
+
+
+def cancel_run(run_id: str):
+    """Any party: ask this host's daemon to stop every job of run_id at once
+    (MPC party processes are killed, client connections closed, locks
+    released). Dispatched by central() when a run fails."""
+    _bridge_io.cancel_run(BRIDGE, run_id)
+    info(f"cancel requested for run {run_id}")
+    return {"status": "complete", "run_id": run_id, "cancel_requested": True}

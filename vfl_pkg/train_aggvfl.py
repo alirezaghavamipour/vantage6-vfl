@@ -77,7 +77,7 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     # never comes from the task.
     if recipient_key_sha256:
         job["recipient_key_sha256"] = recipient_key_sha256
-    publish_job(JOBS_DIR, job)
+    publish_job(JOBS_DIR, job, timeout_s=TRAIN_TIMEOUT)
     info(f"Train (aggVFL): submitted job {job_id} ({action}, method={matching_method}, "
          f"fuzzy_threshold={fuzzy_threshold}), waiting for host daemon...")
 

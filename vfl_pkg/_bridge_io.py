@@ -49,37 +49,111 @@ def _atomic_write_json(path, obj):
         raise
 
 
-def publish_job(jobs_dir, job):
+# Deadline/heartbeat contract with the host daemons (daemons/job_control.py):
+# every job carries an absolute deadline; the daemon stops its work
+# CLEANUP_MARGIN before it and this side keeps waiting until RESULT_GRACE
+# after it, so the container never gives up while the daemon still works.
+RESULT_GRACE_SECONDS = 10
+_SETTINGS = {"poll_interval": 1.0, "deadline": None, "readiness": False, "ready_poll": 0.1}
+_DEADLINES = {}
+
+
+def configure(poll_interval=None, deadline=None, readiness=None, ready_poll=None):
+    """Per-container settings, set once by the task function from its kwargs."""
+    if poll_interval is not None:
+        _SETTINGS["poll_interval"] = min(max(float(poll_interval), 0.05), 5.0)
+    if deadline is not None:
+        _SETTINGS["deadline"] = float(deadline)
+    if readiness is not None:
+        _SETTINGS["readiness"] = bool(readiness)
+    if ready_poll is not None:
+        _SETTINGS["ready_poll"] = min(max(float(ready_poll), 0.05), 2.0)
+
+
+def _bridge_dir(any_bridge_subdir):
+    return os.path.dirname(os.path.abspath(any_bridge_subdir))
+
+
+def _touch(path):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a"):
+            os.utime(path, None)
+    except OSError:
+        pass
+
+
+def publish_job(jobs_dir, job, timeout_s=None):
     """Atomically write job (must already contain 'job_id') to
-    jobs_dir/<job_id>.json."""
+    jobs_dir/<job_id>.json, stamped with its deadline (the run's shared
+    deadline if configured, else now + timeout_s) and heartbeat contract."""
     os.makedirs(jobs_dir, exist_ok=True)
+    now = time.time()
+    job = dict(job)
+    deadline = _SETTINGS["deadline"] if _SETTINGS["deadline"] is not None else (
+        now + timeout_s if timeout_s else None)
+    if deadline is not None:
+        job["deadline"] = deadline
+    job.update(heartbeat=True, published=now)
+    if _SETTINGS["readiness"]:
+        job.update(readiness=True, ready_poll=_SETTINGS["ready_poll"])
+    _DEADLINES[job["job_id"]] = deadline
+    _touch(os.path.join(_bridge_dir(jobs_dir), "heartbeats", job["job_id"]))
     path = os.path.join(jobs_dir, job["job_id"] + ".json")
     _atomic_write_json(path, job)
     return path
 
 
+def _give_up(bridge, job_id):
+    """Asks the daemon to stop this job and removes it if still queued."""
+    _touch(os.path.join(bridge, "cancel", job_id))
+    try:
+        os.remove(os.path.join(bridge, "jobs", job_id + ".json"))
+    except OSError:
+        pass
+
+
 def wait_for_result(results_dir, job_id, timeout_s, label="job"):
-    """Poll results_dir/<job_id>.json for up to timeout_s seconds and
-    return the parsed result dict, removing the file once read.
-    Tolerates a transient malformed/torn read (should not occur given
-    the daemon's own atomic write, but defensively retried rather than
-    raised in case some other, non-atomic writer is ever in the loop)
-    by treating it the same as "not ready yet." Raises TimeoutError if
-    no readable result ever arrives within timeout_s.
+    """Poll results_dir/<job_id>.json until the job's deadline + grace (or
+    timeout_s for a job published without one), refreshing its heartbeat,
+    and return the parsed result dict, removing the file once read.
+    Tolerates a transient malformed/torn read by treating it as "not ready
+    yet". On giving up (or being interrupted) the daemon is told to stop
+    the job; raises TimeoutError if no readable result arrives in time.
     """
+    bridge = _bridge_dir(results_dir)
+    heartbeat = os.path.join(bridge, "heartbeats", job_id)
+    deadline = _DEADLINES.get(job_id)
+    until = deadline + RESULT_GRACE_SECONDS if deadline is not None else time.time() + timeout_s
     result_path = os.path.join(results_dir, job_id + ".json")
-    for _ in range(timeout_s):
-        if os.path.exists(result_path):
-            try:
-                with open(result_path) as f:
-                    result = json.load(f)
-            except (json.JSONDecodeError, OSError, ValueError):
-                time.sleep(1)
-                continue
-            try:
-                os.remove(result_path)
-            except OSError:
-                pass
-            return result
-        time.sleep(1)
-    raise TimeoutError(f"{label}: host daemon did not respond to job {job_id} within {timeout_s}s")
+    finished = False
+    try:
+        while time.time() < until:
+            _touch(heartbeat)
+            if os.path.exists(result_path):
+                try:
+                    with open(result_path) as f:
+                        result = json.load(f)
+                except (json.JSONDecodeError, OSError, ValueError):
+                    time.sleep(_SETTINGS["poll_interval"])
+                    continue
+                try:
+                    os.remove(result_path)
+                except OSError:
+                    pass
+                finished = True
+                return result
+            time.sleep(_SETTINGS["poll_interval"])
+    finally:
+        if not finished:
+            _give_up(bridge, job_id)
+        try:
+            os.remove(heartbeat)
+        except OSError:
+            pass
+    raise TimeoutError(f"{label}: host daemon did not respond to job {job_id} by its deadline")
+
+
+def cancel_run(bridge, run_id):
+    """Asks every daemon job of this run on this host to stop."""
+    _touch(os.path.join(bridge, "cancel", run_id))

@@ -1,14 +1,29 @@
+import time
 import uuid
 
 from vantage6.algorithm.tools.decorators import algorithm_client
 from vantage6.algorithm.client import AlgorithmClient
 from vantage6.algorithm.tools.util import info
 
+from . import _orchestration as orch
 from . import _psi_capacity
 from . import datasets
+from .psi import TIMEOUT_BY_METHOD as PSI_TIMEOUT_BY_METHOD
 
 
 SUPPORTED_FUZZY_THRESHOLDS = (1, 2, 3)
+SCHEMA_BUDGET_SECONDS = 60
+MAX_EXPLICIT_EXACT_CAPACITY = 1_000_000
+
+
+def _psi_round_budget(matching_method, max_entities):
+    """Seconds from dispatch until a PSI round must be over: queueing, a
+    possible compile, the MPC run itself and clean-up. Exact PSI scales with
+    capacity (measured: ~18 s compile and ~5 s MPC at 1100); the fuzzy methods
+    keep their own measured budgets."""
+    if matching_method == "exact":
+        return 60 + (5 + 0.025 * max_entities) + (10 + 0.01 * max_entities) + 15
+    return PSI_TIMEOUT_BY_METHOD.get(matching_method, 120)
 
 
 @algorithm_client
@@ -22,6 +37,9 @@ def central(
     psi_capacity_mode: str = "manual",
     debug: bool = False,
     dataset: str = datasets.DEFAULT_DATASET,
+    group_by_role: bool = False,
+    poll_interval: float = 1.0,
+    readiness: bool = False,
 ):
     """
     Orchestrate a full Rep3 PSI run in one submission: dispatch
@@ -136,6 +154,14 @@ def central(
     datasets.validate_psi_selection(dataset, matching_method, psi_capacity)
     psi_label = datasets.psi_database_label(dataset)
     database_by_client_id = {0: psi_label, 1: psi_label, 2: psi_label}
+    poll_interval = min(max(float(poll_interval), 0.05), 5.0)
+    # Exact PSI with an explicit capacity needs no schema discovery: every
+    # client checks its own input against that capacity inside the PSI
+    # circuit, which aborts for all parties if any input does not fit.
+    explicit_exact_capacity = matching_method == "exact" and psi_capacity is not None
+    if explicit_exact_capacity and (isinstance(psi_capacity, bool) or not isinstance(psi_capacity, int)
+                                    or not 1 <= psi_capacity <= MAX_EXPLICIT_EXACT_CAPACITY):
+        raise ValueError(f"psi_capacity={psi_capacity!r} must be an integer between 1 and {MAX_EXPLICIT_EXACT_CAPACITY}")
 
     # Ties every job this run dispatches - across all client and
     # aggregator hosts - back to this one orchestrated run, so anyone
@@ -212,21 +238,23 @@ def central(
     # capacity_mode="dynamic" (bug #3 fix, automatic mode only): reads
     # from the snapshot negotiation just retained above, instead of a
     # fresh CSV read.
-    schema_tasks = {
-        org_id: client.task.create(
-            input_={"method": "report_schema_run", "kwargs": {
-                "run_id": run_id, "include_row_count": not is_automatic_capacity,
-                **({"capacity_mode": "dynamic"} if is_automatic_capacity else {}),
-                "database": psi_label,
-            }},
-            organizations=[org_id], name=f"schema-psi-{org_id}",
-        )["id"]
-        for org_id in client_org_ids
-    }
-    schema_results = {org_id: client.wait_for_results(task_id=task_id)[0]
-                       for org_id, task_id in schema_tasks.items()}
+    if explicit_exact_capacity:
+        max_entities = psi_capacity
+        info(f"Central: explicit exact-PSI capacity {max_entities} - schema discovery skipped")
+    else:
+        schema_deadline = time.time() + SCHEMA_BUDGET_SECONDS
+        schema_tasks = orch.dispatch(client, "report_schema_run", {
+            "run_id": run_id, "include_row_count": not is_automatic_capacity,
+            **({"capacity_mode": "dynamic"} if is_automatic_capacity else {}),
+            "database": psi_label, "deadline": schema_deadline, "poll_interval": poll_interval,
+        }, client_org_ids, "schema-psi", group_by_role)
+        schema_results, _ = orch.collect(client, schema_tasks, poll_interval, until=schema_deadline + 10)
+        failed = {org: (r or {}).get("message") for org, r in schema_results.items()
+                  if not r or r.get("status", "complete") != "complete"}
+        if failed:
+            raise RuntimeError(f"schema discovery failed for organizations {sorted(failed)}: {failed}")
 
-    if not is_automatic_capacity:
+    if not is_automatic_capacity and not explicit_exact_capacity:
         raw_row_counts = [schema_results[org_id]["n_rows"] for org_id in client_org_ids]
         max_entities = ((max(raw_row_counts) // 50) + 2) * 50
         if matching_method == "fuzzy_experimental":
@@ -258,31 +286,23 @@ def central(
     # debug kwarg (aggregators never see matched names either way), so
     # this only applies to the client-share kwargs, not the shared dict
     # used for the aggregator loop below.
-    client_kwargs = dict(kwargs, debug=debug, database_by_client_id=database_by_client_id)
+    # One shared absolute deadline for every party of this round, so all
+    # containers and daemons stop together; any failure cancels the rest.
+    psi_deadline = time.time() + _psi_round_budget(matching_method, max_entities)
+    round_kwargs = {"deadline": psi_deadline, "poll_interval": poll_interval, "readiness": bool(readiness)}
+    client_kwargs = dict(kwargs, debug=debug, database_by_client_id=database_by_client_id, **round_kwargs)
+    agg_kwargs = dict(kwargs, **round_kwargs)
 
     tasks = {}
-    for org_id in client_org_ids:
-        t = client.task.create(
-            input_={"method": "psi_client_share", "kwargs": client_kwargs},
-            organizations=[org_id],
-            name=f"psi-client-{org_id}",
-        )
-        tasks[org_id] = t["id"]
+    tasks.update(orch.dispatch(client, "psi_client_share", client_kwargs, client_org_ids, "psi-client", group_by_role))
+    tasks.update(orch.dispatch(client, "psi_party_run", agg_kwargs, agg_org_ids, "psi-agg", group_by_role))
+    info(f"Central: {len(tasks)} sub-task(s) submitted for {len(client_org_ids) + len(agg_org_ids)} parties, "
+         f"waiting for results...")
 
-    for org_id in agg_org_ids:
-        t = client.task.create(
-            input_={"method": "psi_party_run", "kwargs": kwargs},
-            organizations=[org_id],
-            name=f"psi-agg-{org_id}",
-        )
-        tasks[org_id] = t["id"]
+    def cancel_everyone():
+        orch.cancel_run(client, run_id, list(client_org_ids) + list(agg_org_ids))
 
-    info(f"Central: all {len(tasks)} sub-tasks submitted, waiting for results...")
-
-    results = {}
-    for org_id, task_id in tasks.items():
-        res = client.wait_for_results(task_id=task_id)
-        results[org_id] = res[0] if res else None
+    results, _ = orch.collect(client, tasks, poll_interval, until=psi_deadline + 10, on_failure=cancel_everyone)
 
     # The aggregators never learn the answer - the MPC circuit obliviously
     # sorts all parties' (hashed) identifier values, finds 3-way matches,
@@ -369,6 +389,7 @@ def central(
             {"metric": "matching_method", "value": matching_method},
             {"metric": "fuzzy_threshold", "value": fuzzy_threshold if matching_method in ("fuzzy", "fuzzy_experimental") else None},
             {"metric": "intersection_size", "value": intersection_size},
+            {"metric": "schema_discovery", "value": "skipped (explicit capacity)" if explicit_exact_capacity else "run"},
             {"metric": "clients_agree", "value": clients_agree},
             {"metric": "clients_ok", "value": clients_ok},
             {"metric": "aggregators_ok", "value": aggregators_ok},

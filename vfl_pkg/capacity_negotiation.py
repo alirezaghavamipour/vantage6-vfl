@@ -48,7 +48,7 @@ def count_discovery_client_run(run_id: str = None, database_by_client_id: dict =
     if run_id:
         job["run_id"] = run_id
     job["database_by_client_id"] = database_by_client_id or {}
-    publish_job(JOBS_DIR, job)
+    publish_job(JOBS_DIR, job, timeout_s=COUNT_DISCOVERY_TIMEOUT)
     info(f"CapacityNegotiation: submitted count_discovery_client_run job {job_id} "
          f"(run_id={run_id}), waiting for host daemon...")
     result = wait_for_result(RESULTS_DIR, job_id, COUNT_DISCOVERY_TIMEOUT, label="CapacityNegotiation")
@@ -64,7 +64,7 @@ def count_discovery_run(run_id: str = None):
     job = {"job_id": job_id, "action": "count_discovery_run"}
     if run_id:
         job["run_id"] = run_id
-    publish_job(JOBS_DIR, job)
+    publish_job(JOBS_DIR, job, timeout_s=COUNT_DISCOVERY_TIMEOUT)
     info(f"CapacityNegotiation: submitted count_discovery_run job {job_id} "
          f"(run_id={run_id}), waiting for host daemon...")
     result = wait_for_result(RESULTS_DIR, job_id, COUNT_DISCOVERY_TIMEOUT, label="CapacityNegotiation")
@@ -87,7 +87,7 @@ def prepare_dynamic_capacity_run(run_id: str = None, max_entities: int = None, f
         job["run_id"] = run_id
     if max_entities:
         job["max_entities"] = max_entities
-    publish_job(JOBS_DIR, job)
+    publish_job(JOBS_DIR, job, timeout_s=PREPARE_DYNAMIC_CAPACITY_TIMEOUT)
     info(f"CapacityNegotiation: submitted prepare_dynamic_capacity_run job {job_id} "
          f"(run_id={run_id}, max_entities={max_entities}), waiting for host daemon...")
     result = wait_for_result(RESULTS_DIR, job_id, PREPARE_DYNAMIC_CAPACITY_TIMEOUT, label="CapacityNegotiation")

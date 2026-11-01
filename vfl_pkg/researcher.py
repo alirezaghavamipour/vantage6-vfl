@@ -21,7 +21,7 @@ RESULTS_DIR = os.path.join(BRIDGE, "results")
 def researcher_receive(run_id: str, mpc_port: int, n_values: int, timeout_s: int = 900):
     job_id = str(uuid.uuid4())
     publish_job(JOBS_DIR, {"job_id": job_id, "action": "researcher_receive",
-                           "run_id": run_id, "mpc_port": mpc_port, "n_values": n_values})
+                           "run_id": run_id, "mpc_port": mpc_port, "n_values": n_values}, timeout_s=timeout_s)
     info(f"Researcher output: waiting for run {run_id}")
     result = wait_for_result(RESULTS_DIR, job_id, timeout_s, label="researcher output")
     info(f"Researcher output: run {run_id} finished with status {result.get('status')}")

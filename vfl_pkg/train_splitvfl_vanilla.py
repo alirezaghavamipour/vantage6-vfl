@@ -56,7 +56,7 @@ def _run_job(action: str, matching_method: str = "exact", fuzzy_threshold: int =
     # algorithm: see train_vanilla.py's matching comment.
     if algorithm != "logistic":
         job["algorithm"] = algorithm
-    publish_job(JOBS_DIR, job)
+    publish_job(JOBS_DIR, job, timeout_s=VANILLA_TIMEOUT)
     info(f"Vanilla splitVFL train: submitted job {job_id} ({action}, method={matching_method}, "
          f"fuzzy_threshold={fuzzy_threshold}), waiting for host daemon...")
 
