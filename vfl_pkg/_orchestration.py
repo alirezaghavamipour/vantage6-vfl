@@ -15,9 +15,11 @@ ACTIVE_STATUSES = {"pending", "initializing", "active"}
 
 
 def dispatch(client, method, kwargs, org_ids, name, group_by_role):
-    """Returns {task_id: [org_id, ...]}."""
+    """Returns {task_id: [org_id, ...]}. A client that cannot list runs (and so
+    cannot map a grouped task's results to organizations) gets one task per
+    organization."""
     org_ids = list(org_ids)
-    if group_by_role:
+    if group_by_role and hasattr(client, "run"):
         t = client.task.create(input_={"method": method, "kwargs": kwargs}, organizations=org_ids, name=name)
         return {t["id"]: org_ids}
     tasks = {}
